@@ -47,16 +47,18 @@ export function OperationList() {
   const [view, setView] = useState('list')
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
+  const [wh, setWh] = useState('')
   const dq = useDebounced(q)
-  const { data } = useApi('/operations', { type: cfg?.type, q: dq, status }, [kind])
+  const whs = useApi('/warehouses').data || []
+  const { data } = useApi('/operations', { type: cfg?.type, q: dq, status, warehouse_id: wh }, [kind])
   const nav = useNavigate()
   const rows = data || []
   const pager = usePager(rows)
-  useEffect(() => { setQ(''); setStatus('') }, [kind])
+  useEffect(() => { setQ(''); setStatus(''); setWh('') }, [kind])
   if (!cfg) return <div className="muted">Unknown page</div>
   const open = (o) => nav(`/operations/${kind}/${o.id}`)
   const statuses = cfg.flow.concat(['cancelled'])
-  const filtered = q || status
+  const filtered = q || status || wh
 
   return (
     <>
@@ -74,6 +76,12 @@ export function OperationList() {
             <option value="">All statuses</option>
             {statuses.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
           </select>
+          {whs.length > 1 && (
+            <select value={wh} onChange={(e) => setWh(e.target.value)}>
+              <option value="">All warehouses</option>
+              {whs.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          )}
           <span className="grow" />
           <Segmented value={view} onChange={setView} options={VIEW_OPTS} />
         </div>

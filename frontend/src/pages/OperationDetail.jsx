@@ -6,7 +6,7 @@ import { Icon } from '../components/icons.jsx'
 import { Field, PageHeader, Status, Stepper, Toast, money, num, useToast } from '../components/ui.jsx'
 import { KINDS } from './Operations.jsx'
 
-const blank = () => ({ contact: '', schedule_date: new Date().toISOString().slice(0, 10), source_location_id: '', dest_location_id: '', lines: [] })
+const blank = () => ({ warehouse_id: '', contact: '', schedule_date: new Date().toISOString().slice(0, 10), source_location_id: '', dest_location_id: '', lines: [] })
 
 function Totals({ lines }) {
   let sub = 0
@@ -53,11 +53,13 @@ export default function OperationDetail({ user }) {
   const [busy, setBusy] = useState(false)
   const products = useApi('/products').data || []
   const locs = useApi('/locations', { internal_only: true }).data || []
+  const whs = useApi('/warehouses').data || []
   const contacts = useApi('/contacts', { type: cfg?.type }, [kind]).data || []
 
   const hydrate = (o) => {
     setOp(o)
     setForm({
+      warehouse_id: o.warehouse.id,
       contact: o.contact || '',
       schedule_date: o.schedule_date,
       source_location_id: o.source_location.id,
@@ -71,6 +73,7 @@ export default function OperationDetail({ user }) {
     // eslint-disable-next-line
   }, [id, kind])
 
+  const chosenWh = form.warehouse_id || (isNew ? whs[0]?.id : '') || ''
   if (!cfg) return <div className="muted">Unknown page</div>
   const status = op?.status || 'draft'
   const editable = isNew || ['draft', 'waiting', 'ready'].includes(status)
@@ -87,6 +90,7 @@ export default function OperationDetail({ user }) {
   }
   const payload = () => ({
     type: t,
+    warehouse_id: t !== 'INT' && chosenWh ? Number(chosenWh) : null,
     contact: form.contact || null,
     schedule_date: form.schedule_date,
     source_location_id: form.source_location_id ? Number(form.source_location_id) : null,
@@ -129,12 +133,15 @@ export default function OperationDetail({ user }) {
     ? form.lines.filter((l) => l.product_id).map((l) => ({ quantity: l.quantity, unit_price: l.unit_price, tax_rate: prod(l.product_id)?.tax?.rate || 0, tax_name: prod(l.product_id)?.tax?.name }))
     : (op?.lines || [])
 
+  // receipts/deliveries stay inside one warehouse; transfers may cross warehouses
+  const locOptions = t === 'INT' || !chosenWh ? locs : locs.filter((l) => l.warehouse_id === Number(chosenWh))
   const locSelect = (key, empty) => (
     <select disabled={!editable} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })}>
       <option value="">{empty}</option>
-      {locs.map((l) => <option key={l.id} value={l.id}>{l.full_name}</option>)}
+      {locOptions.map((l) => <option key={l.id} value={l.id}>{l.full_name}</option>)}
     </select>
   )
+  const pickWarehouse = (e) => setForm({ ...form, warehouse_id: e.target.value, source_location_id: '', dest_location_id: '' })
 
   return (
     <>
@@ -177,6 +184,13 @@ export default function OperationDetail({ user }) {
             </Field>
             <Field label="Schedule date"><input type="date" disabled={!editable} value={form.schedule_date} onChange={(e) => setForm({ ...form, schedule_date: e.target.value })} /></Field>
             <Field label="Responsible"><input disabled value={op?.responsible || user.login_id} /></Field>
+            {t !== 'INT' && (
+              <Field label="Warehouse" hint={isNew ? 'Sets the reference prefix and stock locations' : undefined}>
+                <select disabled={!isNew} value={chosenWh} onChange={pickWarehouse}>
+                  {whs.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.short_code})</option>)}
+                </select>
+              </Field>
+            )}
             {t === 'INT' ? (
               <>
                 <Field label="From">{locSelect('source_location_id', 'Select location')}</Field>

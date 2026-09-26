@@ -12,9 +12,11 @@ export default function MoveHistory() {
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
   const [direction, setDirection] = useState('')
+  const [wh, setWh] = useState('')
+  const whs = useApi('/warehouses').data || []
   const [view, setView] = useState('list')
   const dq = useDebounced(q)
-  const { data } = useApi('/moves', { q: dq, status, direction })
+  const { data } = useApi('/moves', { q: dq, status, direction, warehouse_id: wh })
   const nav = useNavigate()
   const rows = data || []
   const pager = usePager(rows)
@@ -36,6 +38,12 @@ export default function MoveHistory() {
             <option value="">All statuses</option>
             {['waiting', 'ready', 'done'].map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
           </select>
+          {whs.length > 1 && (
+            <select value={wh} onChange={(e) => setWh(e.target.value)}>
+              <option value="">All warehouses</option>
+              {whs.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          )}
           <span className="grow" />
           <Segmented value={view} onChange={setView} options={VIEW_OPTS} />
         </div>

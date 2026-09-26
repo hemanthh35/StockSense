@@ -1,27 +1,42 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useApi } from '../hooks'
 import { Icon } from '../components/icons.jsx'
-import { Empty, PageHeader, Status, fmtDate, num } from '../components/ui.jsx'
+import { Empty, PageHeader, STATUS_LABEL, fmtDate, num } from '../components/ui.jsx'
 
-function OpCard({ title, icon, tint, ink, to, verb, d }) {
+const CARD = {
+  IN: { title: 'Receipts', icon: 'receive', tint: 'var(--mint-bg)', ink: 'var(--green)', to: '/operations/receipts', verb: 'to receive' },
+  OUT: { title: 'Deliveries', icon: 'deliver', tint: 'var(--sky-bg)', ink: 'var(--blue)', to: '/operations/deliveries', verb: 'to deliver' },
+  INT: { title: 'Internal transfers', icon: 'swap', tint: 'var(--lav-bg)', ink: 'var(--lav)', to: '/operations/transfers', verb: 'to move' },
+  ADJ: { title: 'Adjustments', icon: 'sliders', tint: 'var(--butter-bg)', ink: 'var(--amber)', to: '/operations/adjustments', verb: 'logged' },
+}
+const SEGMENTS = ['draft', 'waiting', 'ready', 'done', 'cancelled']
+const SEG_COLOR = { draft: 'var(--p-draft)', waiting: 'var(--p-waiting)', ready: 'var(--p-ready)', done: 'var(--p-done)', cancelled: 'var(--p-cancelled)' }
+const KEY = 'stocksense_dash_filters'
+const EMPTY = { doc_type: '', status: '', warehouse_id: '', location_id: '', category_id: '' }
+
+function load() {
+  try { return { ...EMPTY, ...JSON.parse(sessionStorage.getItem(KEY) || '{}') } } catch { return EMPTY }
+}
+
+function OpCard({ type, d, status }) {
+  const c = CARD[type]
   const s = d.by_status
-  const total = Math.max(s.draft + s.waiting + s.ready, 1)
+  const shown = status ? [status] : type === 'ADJ' ? ['done'] : SEGMENTS.slice(0, 3)
+  const total = Math.max(shown.reduce((a, k) => a + s[k], 0), 1)
   return (
-    <Link to={to} className="card opcard" style={{ '--tint': tint, '--ink': ink }}>
+    <Link to={c.to} className="card opcard" style={{ '--tint': c.tint, '--ink': c.ink }}>
       <div className="opcard-top">
-        <span className="chip"><Icon name={icon} size={18} /></span>
-        {title}
+        <span className="chip"><Icon name={c.icon} size={18} /></span>
+        {c.title}
         <Icon name="arrowupright" size={18} className="go" />
       </div>
-      <div className="opcard-num"><b>{d.to_process}</b><span>to {verb}</span></div>
+      <div className="opcard-num"><b>{d.to_process}</b><span>{status ? STATUS_LABEL[status].toLowerCase() : c.verb}</span></div>
       <div className="bar" aria-hidden="true">
-        {['draft', 'waiting', 'ready'].map((k) => s[k] > 0 && <i key={k} className={`b-${k}`} style={{ width: `${(s[k] / total) * 100}%` }} />)}
+        {shown.map((k) => s[k] > 0 && <i key={k} style={{ width: `${(s[k] / total) * 100}%`, background: SEG_COLOR[k] }} />)}
       </div>
       <div className="legend">
-        <span style={{ '--c': 'var(--p-draft)' }}>Draft {s.draft}</span>
-        <span style={{ '--c': 'var(--p-waiting)' }}>Waiting {s.waiting}</span>
-        <span style={{ '--c': 'var(--p-ready)' }}>Ready {s.ready}</span>
+        {shown.map((k) => <span key={k} style={{ '--c': SEG_COLOR[k] }}>{STATUS_LABEL[k]} {s[k]}</span>)}
       </div>
       <div className="opcard-foot">
         <span className={d.late ? 'late' : ''}>{d.late} late</span>
@@ -42,39 +57,62 @@ const KPIS = [
 ]
 
 export default function Dashboard() {
-  const [f, setF] = useState({ warehouse_id: '', category_id: '' })
+  const [f, setF] = useState(load)
+  useEffect(() => { try { sessionStorage.setItem(KEY, JSON.stringify(f)) } catch { /* private mode */ } }, [f])
   const { data } = useApi('/dashboard', f)
-  const moves = useApi('/moves', { warehouse_id: f.warehouse_id }).data
+  const moves = useApi('/moves', { type: f.doc_type, status: f.status, warehouse_id: f.warehouse_id, location_id: f.location_id, category_id: f.category_id }).data
   const wh = useApi('/warehouses').data || []
+  const locs = useApi('/locations', { internal_only: true, warehouse_id: f.warehouse_id }).data || []
   const cats = useApi('/categories').data || []
+  const active = Object.values(f).filter(Boolean).length
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value, ...(k === 'warehouse_id' ? { location_id: '' } : {}) })
 
   return (
     <>
-      <PageHeader
-        title="Dashboard"
-        subtitle="A live snapshot of your inventory operations."
-        actions={
-          <>
-            <select value={f.warehouse_id} onChange={(e) => setF({ ...f, warehouse_id: e.target.value })} style={{ width: 180 }}>
+      <PageHeader title="Dashboard" subtitle="A live snapshot of your inventory operations." />
+
+      <div className="card filterbar">
+        <div className="filter-fields">
+          <label><span>Document</span>
+            <select value={f.doc_type} onChange={set('doc_type')}>
+              <option value="">All documents</option>
+              {Object.entries(CARD).map(([k, c]) => <option key={k} value={k}>{c.title}</option>)}
+            </select>
+          </label>
+          <label><span>Status</span>
+            <select value={f.status} onChange={set('status')}>
+              <option value="">Open work</option>
+              {SEGMENTS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+            </select>
+          </label>
+          <label><span>Warehouse</span>
+            <select value={f.warehouse_id} onChange={set('warehouse_id')}>
               <option value="">All warehouses</option>
               {wh.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
-            <select value={f.category_id} onChange={(e) => setF({ ...f, category_id: e.target.value })} style={{ width: 170 }}>
+          </label>
+          <label><span>Location</span>
+            <select value={f.location_id} onChange={set('location_id')}>
+              <option value="">All locations</option>
+              {locs.map((l) => <option key={l.id} value={l.id}>{l.full_name}</option>)}
+            </select>
+          </label>
+          <label><span>Category</span>
+            <select value={f.category_id} onChange={set('category_id')}>
               <option value="">All categories</option>
               {cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-          </>
-        }
-      />
+          </label>
+        </div>
+        {active > 0 && <button className="btn ghost sm" onClick={() => setF(EMPTY)}><Icon name="x" size={14} />Clear {active} filter{active > 1 ? 's' : ''}</button>}
+      </div>
 
       {!data ? (
         <div className="grid3">{[0, 1, 2].map((i) => <div key={i} className="card opcard" style={{ height: 222 }}><span className="skeleton" style={{ width: '40%' }} /><span className="skeleton" style={{ width: '25%', height: 34 }} /></div>)}</div>
       ) : (
         <>
           <div className="grid3">
-            <OpCard title="Receipts" icon="receive" tint="var(--mint-bg)" ink="var(--green)" to="/operations/receipts" verb="receive" d={data.receipt} />
-            <OpCard title="Deliveries" icon="deliver" tint="var(--sky-bg)" ink="var(--blue)" to="/operations/deliveries" verb="deliver" d={data.delivery} />
-            <OpCard title="Internal transfers" icon="swap" tint="var(--lav-bg)" ink="var(--lav)" to="/operations/transfers" verb="move" d={data.internal} />
+            {data.cards.map((c) => <OpCard key={c.type} type={c.type} d={c} status={f.status} />)}
           </div>
 
           <div className="section-title">Inventory snapshot</div>
@@ -118,7 +156,7 @@ export default function Dashboard() {
             <div className="card">
               <div className="card-head"><h3>Recent movements</h3><Link to="/moves" className="link small">All moves</Link></div>
               {!moves || moves.length === 0 ? (
-                <Empty icon="swap" title="No movements yet" hint="Validated receipts and deliveries show up here." />
+                <Empty icon="swap" title="No movements" hint={active ? 'Nothing matches these filters.' : 'Validated receipts and deliveries show up here.'} />
               ) : (
                 <ul className="feed">
                   {moves.slice(0, 6).map((m, i) => (

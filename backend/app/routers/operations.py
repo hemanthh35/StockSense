@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import pricing, stock
+from ..filters import op_filters
 from ..db import get_db
 from ..deps import current_user
 from ..models import Location, Operation, OperationLine, Product, User, Warehouse
@@ -96,22 +97,50 @@ def _load(db: Session, op_id: int) -> Operation:
     return op
 
 
-def _default_locations(db: Session, body: OperationIn, wh: Warehouse) -> tuple[int, int]:
-    internal = db.scalar(
-        select(Location).where(Location.warehouse_id == wh.id, Location.type == "internal").order_by(Location.id)
-    )
+def _resolve_locations(db: Session, op_type: str, warehouse_id: int | None, src_id: int | None, dst_id: int | None):
+    """Work out (warehouse, source, dest). Receipts/deliveries live in one warehouse;
+    internal transfers may cross warehouses and take their warehouse from the From location."""
+
+    def get(i):
+        loc = db.get(Location, i) if i else None
+        if i and not loc:
+            raise HTTPException(422, "Unknown location")
+        return loc
+
+    src, dst = get(src_id), get(dst_id)
+    wh = None
+    if warehouse_id:
+        wh = db.get(Warehouse, warehouse_id)
+        if not wh:
+            raise HTTPException(422, "Unknown warehouse")
+
+    if op_type == "INT":
+        if not src or not dst:
+            raise HTTPException(422, "Internal transfers need a From and To location")
+        if src.type != "internal" or dst.type != "internal":
+            raise HTTPException(422, "Transfers can only move stock between stock locations")
+        if src.id == dst.id:
+            raise HTTPException(422, "From and To must be different locations")
+        return src.warehouse, src, dst
+
+    tracked = dst if op_type == "IN" else src
+    if tracked is None:
+        wh = wh or db.scalar(select(Warehouse).order_by(Warehouse.id))
+        if not wh:
+            raise HTTPException(422, "Create a warehouse first")
+        tracked = db.scalar(
+            select(Location).where(Location.warehouse_id == wh.id, Location.type == "internal").order_by(Location.id)
+        )
+        if not tracked:
+            raise HTTPException(422, "This warehouse has no stock location yet")
+    if tracked.type != "internal":
+        raise HTTPException(422, "Choose a stock location")
+    if wh and tracked.warehouse_id != wh.id:
+        raise HTTPException(422, "That location belongs to a different warehouse")
+    wh = wh or tracked.warehouse
     vendor = db.scalar(select(Location).where(Location.type == "vendor"))
     customer = db.scalar(select(Location).where(Location.type == "customer"))
-    if not internal:
-        raise HTTPException(422, "This warehouse has no stock location yet")
-    src, dst = body.source_location_id, body.dest_location_id
-    if body.type == "IN":
-        src, dst = src or vendor.id, dst or internal.id
-    elif body.type == "OUT":
-        src, dst = src or internal.id, dst or customer.id
-    elif not src or not dst:
-        raise HTTPException(422, "Internal transfers need a From and To location")
-    return src, dst
+    return (wh, vendor, tracked) if op_type == "IN" else (wh, tracked, customer)
 
 
 def _validate_lines(db: Session, lines: list[LineIn]) -> None:
@@ -147,19 +176,15 @@ def list_operations(
     status: str | None = None,
     q: str | None = None,
     warehouse_id: int | None = None,
+    location_id: int | None = None,
+    category_id: int | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
-    stmt = select(Operation).options(selectinload(Operation.lines)).order_by(Operation.id.desc())
-    if type:
-        stmt = stmt.where(Operation.type == type)
-    if status:
-        stmt = stmt.where(Operation.status == status)
-    if warehouse_id:
-        stmt = stmt.where(Operation.warehouse_id == warehouse_id)
-    if q:
-        like = f"%{q}%"
-        stmt = stmt.where(or_(Operation.reference.ilike(like), Operation.contact.ilike(like)))
+    stmt = op_filters(
+        select(Operation).options(selectinload(Operation.lines)).order_by(Operation.id.desc()),
+        type=type, status=status, warehouse_id=warehouse_id, location_id=location_id, category_id=category_id, q=q,
+    )
     return [op_out(db, o, with_lines=False) for o in db.scalars(stmt)]
 
 
@@ -167,11 +192,8 @@ def list_operations(
 def create_operation(body: OperationIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     if body.type not in ("IN", "OUT", "INT"):
         raise HTTPException(422, "Type must be IN, OUT or INT (use Stock > Update for adjustments)")
-    wh = db.get(Warehouse, body.warehouse_id) if body.warehouse_id else db.scalar(select(Warehouse).order_by(Warehouse.id))
-    if not wh:
-        raise HTTPException(422, "Create a warehouse first")
     _validate_lines(db, body.lines)
-    src, dst = _default_locations(db, body, wh)
+    wh, src, dst = _resolve_locations(db, body.type, body.warehouse_id, body.source_location_id, body.dest_location_id)
     op = Operation(
         reference=stock.next_reference(db, wh, body.type),
         type=body.type,
@@ -180,8 +202,8 @@ def create_operation(body: OperationIn, db: Session = Depends(get_db), user: Use
         schedule_date=body.schedule_date or date.today(),
         responsible_id=user.id,
         warehouse_id=wh.id,
-        source_location_id=src,
-        dest_location_id=dst,
+        source_location_id=src.id,
+        dest_location_id=dst.id,
     )
     op.lines = _make_lines(db, body.lines)
     db.add(op)
@@ -203,10 +225,11 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
     op.contact = body.contact
     if body.schedule_date:
         op.schedule_date = body.schedule_date
-    if body.source_location_id:
-        op.source_location_id = body.source_location_id
-    if body.dest_location_id:
-        op.dest_location_id = body.dest_location_id
+    # the warehouse (and so the reference prefix) is fixed once the document exists
+    _, src, dst = _resolve_locations(
+        db, op.type, op.warehouse_id if op.type != "INT" else None, body.source_location_id, body.dest_location_id
+    )
+    op.source_location_id, op.dest_location_id = src.id, dst.id
     op.lines = _make_lines(db, body.lines)
     if op.status != "draft":  # edits invalidate the earlier availability check
         op.status = "draft"
@@ -254,7 +277,10 @@ def move_history(
     q: str | None = None,
     status: str | None = None,
     direction: str | None = None,
+    type: str | None = None,
     warehouse_id: int | None = None,
+    location_id: int | None = None,
+    category_id: int | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
@@ -265,13 +291,9 @@ def move_history(
         .where(Operation.status.notin_(["draft", "cancelled"]))
         .order_by(Operation.id.desc())
     )
-    if status:
-        stmt = stmt.where(Operation.status == status)
-    if warehouse_id:
-        stmt = stmt.where(Operation.warehouse_id == warehouse_id)
-    if q:
-        like = f"%{q}%"
-        stmt = stmt.where(or_(Operation.reference.ilike(like), Operation.contact.ilike(like)))
+    stmt = op_filters(
+        stmt, type=type, status=status, warehouse_id=warehouse_id, location_id=location_id, category_id=category_id, q=q
+    )
     rows = []
     for op in db.scalars(stmt).unique():
         d = direction_of(op)
