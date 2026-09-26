@@ -149,7 +149,7 @@ input[type='date'] { color-scheme: light; }
 .input-icon .reveal { position: absolute; right: 4px; top: 3px; }
 .inline { display: flex; gap: 8px; }
 
-.searchbox { position: relative; display: flex; align-items: center; min-width: 260px; }
+.searchbox { position: relative; display: flex; align-items: center; min-width: 320px; }
 .searchbox > .icon { position: absolute; left: 12px; color: var(--text-3); pointer-events: none; }
 .searchbox input { padding-left: 36px; padding-right: 32px; height: 36px; }
 .searchbox .clear { position: absolute; right: 6px; width: 24px; height: 24px; display: grid; place-items: center; background: none; border: 0; border-radius: 6px; color: var(--text-3); cursor: pointer; }
@@ -336,6 +336,15 @@ tr.short td:first-child { box-shadow: inset 3px 0 0 var(--red); }
 .rules li.ok { color: var(--text-2); } .rules li.ok .tick { background: var(--green); border-color: var(--green); color: #fff; }
 .otp { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
 .otp input { height: 52px; text-align: center; font-family: var(--mono); font-size: 22px; padding: 0; }
+
+/* ============ categories & reorder ============ */
+.catlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.catlist li { display: flex; align-items: center; gap: 12px; }
+.catlist li input { flex: 1; height: 38px; }
+.catlist .muted { min-width: 84px; text-align: right; }
+.line-x:disabled { opacity: .3; cursor: not-allowed; } .line-x:disabled:hover { color: var(--text-3); background: none; }
+.suggest { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 12px; font-weight: 600; font-size: 12.5px; background: var(--amber-bg); color: #7a5300; white-space: nowrap; }
+.suggest.ok { background: var(--green-bg); color: #0d5c39; font-weight: 500; }
 
 /* ============ filter bar ============ */
 .filterbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; padding: 14px 16px; margin-bottom: 18px; flex-wrap: wrap; }

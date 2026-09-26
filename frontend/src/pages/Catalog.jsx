@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useApi, useDebounced } from '../hooks'
 import { Icon } from '../components/icons.jsx'
+import CategoryManager from '../components/CategoryManager.jsx'
 import { Empty, Field, Modal, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
 const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
@@ -18,6 +19,7 @@ export function Products() {
   const taxes = useApi('/taxes').data || []
   const [form, setForm] = useState(params.get('new') ? { ...emptyP } : null)
   const [newCat, setNewCat] = useState('')
+  const [manageCats, setManageCats] = useState(false)
   const [toast, notify, close] = useToast()
   const rows = data || []
   const pager = usePager(rows)
@@ -54,7 +56,10 @@ export function Products() {
       <PageHeader
         title="Products"
         subtitle="Your catalogue — SKUs, categories, costs and reorder rules."
-        actions={<button className="btn primary" onClick={() => setForm({ ...emptyP })}><Icon name="plus" size={16} />New product</button>}
+        actions={<>
+          <button className="btn" onClick={() => setManageCats(true)}><Icon name="tag" size={16} />Categories</button>
+          <button className="btn primary" onClick={() => setForm({ ...emptyP })}><Icon name="plus" size={16} />New product</button>
+        </>}
       />
       <div className="card">
         <div className="toolbar">
@@ -86,6 +91,15 @@ export function Products() {
         {data && !rows.length && <Empty icon="box" title={q || cat ? 'No matches' : 'No products yet'} hint={q || cat ? 'Try a different search.' : 'Add your first product to start tracking stock.'} />}
         <Pager p={pager} />
       </div>
+
+      {manageCats && (
+        <CategoryManager
+          categories={cats.data || []}
+          onChanged={async () => { await cats.reload(); reload() }}
+          onClose={() => { setManageCats(false); if (cat && !(cats.data || []).some((c) => String(c.id) === String(cat))) setCat('') }}
+          notify={notify}
+        />
+      )}
 
       {form && (
         <Modal

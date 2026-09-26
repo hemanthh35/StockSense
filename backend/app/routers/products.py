@@ -68,12 +68,14 @@ def _resolve_tax_id(db: Session, body: ProductIn) -> int | None:
     return auto.id if auto else None
 
 
+def _category_out(c: Category, count: int = 0) -> dict:
+    return {"id": c.id, "name": c.name, "default_tax_id": c.default_tax_id, "products": count}
+
+
 @router.get("/categories")
 def list_categories(db: Session = Depends(get_db), _: User = Depends(current_user)):
-    return [
-        {"id": c.id, "name": c.name, "default_tax_id": c.default_tax_id}
-        for c in db.scalars(select(Category).order_by(Category.name))
-    ]
+    counts = dict(db.execute(select(Product.category_id, func.count()).group_by(Product.category_id)).all())
+    return [_category_out(c, counts.get(c.id, 0)) for c in db.scalars(select(Category).order_by(Category.name))]
 
 
 @router.post("/categories", status_code=201)
@@ -86,7 +88,36 @@ def create_category(body: CategoryIn, db: Session = Depends(get_db), _: User = D
         c = Category(name=name)
         db.add(c)
         db.commit()
-    return {"id": c.id, "name": c.name, "default_tax_id": c.default_tax_id}
+    return _category_out(c)
+
+
+@router.put("/categories/{cid}")
+def rename_category(cid: int, body: CategoryIn, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    c = db.get(Category, cid)
+    if not c:
+        raise HTTPException(404, "Category not found")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "Name required")
+    clash = db.scalar(select(Category).where(func.lower(Category.name) == name.lower(), Category.id != cid))
+    if clash:
+        raise HTTPException(409, "A category with this name already exists")
+    c.name = name
+    db.commit()
+    return _category_out(c)
+
+
+@router.delete("/categories/{cid}")
+def delete_category(cid: int, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    c = db.get(Category, cid)
+    if not c:
+        raise HTTPException(404, "Category not found")
+    used = db.scalar(select(func.count()).select_from(Product).where(Product.category_id == cid)) or 0
+    if used:
+        raise HTTPException(409, f"{used} product{'s' if used > 1 else ''} still use this category - move them to another category first")
+    db.delete(c)
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/products")

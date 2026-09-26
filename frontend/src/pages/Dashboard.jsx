@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
+import { api } from '../api'
 import { useApi } from '../hooks'
 import { Icon } from '../components/icons.jsx'
-import { Empty, PageHeader, STATUS_LABEL, fmtDate, num } from '../components/ui.jsx'
+import { Empty, PageHeader, STATUS_LABEL, Toast, fmtDate, num, useToast } from '../components/ui.jsx'
 
 const CARD = {
   IN: { title: 'Receipts', icon: 'receive', tint: 'var(--mint-bg)', ink: 'var(--green)', to: '/operations/receipts', verb: 'to receive' },
@@ -65,6 +66,14 @@ export default function Dashboard() {
   const locs = useApi('/locations', { internal_only: true, warehouse_id: f.warehouse_id }).data || []
   const cats = useApi('/categories').data || []
   const active = Object.values(f).filter(Boolean).length
+  const nav = useNavigate()
+  const [toast, notify, closeToast] = useToast()
+  const reorder = async (ids) => {
+    try {
+      const o = await api('/reorder/receipt', { method: 'POST', body: { product_ids: ids, warehouse_id: f.warehouse_id ? Number(f.warehouse_id) : null } })
+      nav(`/operations/receipts/${o.id}`)
+    } catch (e) { notify(e.message, 'error') }
+  }
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value, ...(k === 'warehouse_id' ? { location_id: '' } : {}) })
 
   return (
@@ -128,13 +137,18 @@ export default function Dashboard() {
           <div className="section-title">Attention</div>
           <div className="two-col">
             <div className="card">
-              <div className="card-head"><h3>Low stock alerts</h3><Link to="/stock" className="link small">View stock</Link></div>
+              <div className="card-head">
+                <h3>Low stock alerts</h3>
+                {data.reorder_count > 0
+                  ? <button className="btn primary sm" onClick={() => reorder(null)}><Icon name="receive" size={14} />Reorder {data.reorder_count} item{data.reorder_count > 1 ? 's' : ''}</button>
+                  : <Link to="/stock" className="link small">View stock</Link>}
+              </div>
               {data.low_stock_items.length === 0 ? (
                 <Empty icon="check" title="All stocked up" hint="No product is at or below its reorder level." />
               ) : (
                 <div className="table-wrap">
                   <table>
-                    <thead><tr><th>Product</th><th>Level</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
+                    <thead><tr><th>Product</th><th>Level</th><th className="num">On hand</th><th className="num">Incoming</th><th>Suggested</th></tr></thead>
                     <tbody>
                       {data.low_stock_items.map((i) => {
                         const pct = i.reorder_min > 0 ? Math.min((i.on_hand / i.reorder_min) * 100, 100) : 0
@@ -143,7 +157,12 @@ export default function Dashboard() {
                             <td className="strong">{i.name}<span className="sub mono">{i.sku}</span></td>
                             <td><span className={`meter ${i.on_hand <= 0 ? 'zero' : ''}`}><i style={{ width: `${pct}%` }} /></span></td>
                             <td className={`num ${i.on_hand <= 0 ? 'neg' : 'warn'}`}>{num(i.on_hand)}</td>
-                            <td className="num">{num(i.reorder_min)}</td>
+                            <td className="num muted">{i.incoming ? `+${num(i.incoming)}` : '—'}</td>
+                            <td>
+                              {i.suggested_qty > 0
+                                ? <span className="inline" style={{ alignItems: 'center' }}><span className="suggest">Order {num(i.suggested_qty)}</span><button className="btn sm" onClick={() => reorder([i.product_id])}>Create receipt</button></span>
+                                : <span className="suggest ok">{i.incoming ? 'Covered by incoming' : 'No rule set'}</span>}
+                            </td>
                           </tr>
                         )
                       })}
@@ -172,6 +191,7 @@ export default function Dashboard() {
           </div>
         </>
       )}
+      <Toast msg={toast.msg} kind={toast.kind} onClose={closeToast} />
     </>
   )
 }

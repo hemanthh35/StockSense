@@ -52,7 +52,7 @@ export function Segmented({ value, onChange, options }) {
   )
 }
 
-export function SearchInput({ value, onChange, placeholder = 'Search reference or contact' }) {
+export function SearchInput({ value, onChange, placeholder = 'Search reference, contact, product or SKU' }) {
   return (
     <div className="searchbox">
       <Icon name="search" size={16} />

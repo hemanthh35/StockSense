@@ -300,7 +300,12 @@ def move_history(
         if direction and d != direction:
             continue
         when = op.done_at.date() if op.done_at else op.schedule_date
+        needle = (q or "").lower()
+        op_match = not needle or needle in op.reference.lower() or needle in (op.contact or "").lower()
         for ln in op.lines:
+            label = f"[{ln.product.sku}] {ln.product.name}"
+            if not op_match and needle not in label.lower():
+                continue  # searching a product: hide the other products on the same document
             rows.append(
                 {
                     "operation_id": op.id,

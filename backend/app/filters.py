@@ -39,5 +39,12 @@ def op_filters(
         stmt = stmt.where(Operation.id.in_(in_category))
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(or_(Operation.reference.ilike(like), Operation.contact.ilike(like)))
+        with_product = (
+            select(OperationLine.operation_id)
+            .join(Product, Product.id == OperationLine.product_id)
+            .where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
+        )
+        stmt = stmt.where(
+            or_(Operation.reference.ilike(like), Operation.contact.ilike(like), Operation.id.in_(with_product))
+        )
     return stmt
