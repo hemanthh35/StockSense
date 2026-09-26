@@ -47,6 +47,8 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 | Brevo API key | `BREVO_API_KEY` | empty → OTP is logged instead of emailed |
 | Brevo sender email | `BREVO_SENDER_EMAIL` | empty (must be a verified Brevo sender) |
 | Brevo sender name | `BREVO_SENDER_NAME` | `StockSense` |
+| Daily digest on/off | `DIGEST_ENABLED` | `true` |
+| Digest hour (UTC) | `DIGEST_HOUR_UTC` | `3` |
 
 ---
 
@@ -60,10 +62,11 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 | `models.py` | All tables (see below). |
 | `security.py` | Password hashing, password-strength rules, JWT create/decode. |
 | `deps.py` | `current_user` dependency; returns 401 for missing/invalid tokens. |
-| `mail.py` | `send_otp()` via Brevo. On failure or missing config it logs the OTP so development never blocks. |
+| `mail.py` | `send_email()` via Brevo (returns False when unconfigured or rejected) and `send_otp()`, which prints the code instead when sending fails so development never blocks. |
 | `stock.py` | **The stock engine**: references, on-hand, reservations, availability, workflow actions (todo/check/pick/pack/validate/cancel), adjustments. |
-| `pricing.py` | Tax resolution for products/lines and document totals with per-tax breakdown. |
+| `pricing.py` | Tax resolution for products/lines, default line prices (purchase cost for receipts, sales price otherwise) and document totals with per-tax breakdown. |
 | `filters.py` | `op_filters()`: one place that applies type/status/warehouse/location/category/search to operation queries. |
+| `digest.py` | Low-stock digest: `build_digest`, `render` (escaped HTML), `run_digest_if_due` (once a day, day claimed before sending). |
 | `lifecycle.py` | Usage checks (stock on hand, open documents, history) that decide whether a product, location or warehouse can be archived or deleted. |
 | `seed.py` | Virtual locations, GST slabs, first-run demo warehouse and products; back-fills older rows. Idempotent. |
 | `demo.py` | `python -m app.demo [--reset]`: builds the presentation dataset (see [DEMO.md](../DEMO.md)). |
@@ -72,6 +75,9 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 | `routers/products.py` | Categories and products. |
 | `routers/operations.py` | Receipts, deliveries, transfers, workflow actions, contacts, move history. |
 | `routers/inventory.py` | Stock view, adjustments, dashboard, reorder suggestions. |
+| `routers/parties.py` | Suppliers and customers: GSTIN validation (format, state code, mod-36 check digit), history and totals. |
+| `routers/reports.py` | Stock valuation and delivery margin. |
+| `routers/notifications.py` | Digest preference and "send me a test digest". |
 | `routers/exports.py` | CSV exports and the product CSV import. |
 
 ---
@@ -80,17 +86,19 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `users` | `login_id` (unique, 6–12), `email` (unique), `password_hash` | |
+| `users` | `login_id` (unique, 6–12), `email` (unique), `password_hash`, `low_stock_digest` | |
+| `parties` | `name` (unique), `kind` (`vendor`/`customer`/`both`), `gstin`, `email`, `phone`, `address`, `active` | Suppliers and customers |
+| `app_settings` | `key`, `value` | Tiny key/value store (e.g. the day the digest was last sent) |
 | `otp_codes` | `email`, `code_hash`, `expires_at`, `attempts`, `used` | 10-minute expiry, 5 attempts |
 | `warehouses` | `name`, `short_code` (unique), `address`, `active` | Short code prefixes references |
 | `locations` | `name`, `short_code`, `type`, `warehouse_id`, `active` | `type`: `internal` (holds stock) · `vendor` · `customer` · `adjustment` (virtual) |
 | `taxes` | `name` (unique), `rate`, `kind` (`GST`/`OTHER`), `active`, `is_default` | Only one default |
 | `categories` | `name` (unique), `default_tax_id` | |
-| `products` | `name`, `sku` (unique), `category_id`, `uom`, `unit_cost`, `hsn_code`, `tax_id`, `reorder_min`, `reorder_qty`, `active` | `active = false` means archived |
+| `products` | `name`, `sku` (unique), `category_id`, `uom`, `unit_cost`, `hsn_code`, `tax_id`, `reorder_min`, `reorder_qty`, `cost_price`, `avg_cost`, `active` | `unit_cost` is the sales price; `cost_price` the purchase price; `avg_cost` the weighted average. `active = false` means archived |
 | `stock_quants` | `product_id`, `location_id`, `quantity` | Unique per product+location; only `internal` locations |
 | `sequences` | `key` (`<warehouse id>/<type>`), `value` | Locked with `SELECT … FOR UPDATE` when numbering |
-| `operations` | `reference` (unique), `type`, `status`, `contact`, `schedule_date`, `responsible_id`, `warehouse_id`, `source_location_id`, `dest_location_id`, `done_at`, `picked_at`, `packed_at` | `type`: `IN` `OUT` `INT` `ADJ` |
-| `operation_lines` | `operation_id`, `product_id`, `quantity`, `unit_price`, `tax_rate`, `tax_name` | Price and tax are **snapshots** |
+| `operations` | `reference` (unique), `type`, `status`, `contact`, `schedule_date`, `responsible_id`, `warehouse_id`, `source_location_id`, `dest_location_id`, `done_at`, `picked_at`, `packed_at`, `party_id`, `backorder_of_id` | `type`: `IN` `OUT` `INT` `ADJ` |
+| `operation_lines` | `operation_id`, `product_id`, `quantity`, `unit_price`, `tax_rate`, `tax_name`, `ordered_qty`, `cost_price` | Price and tax are **snapshots**. `ordered_qty` keeps the original demand after a partial validation; `cost_price` is the average cost when the line moved |
 
 There is no separate ledger table: **operations + lines are the ledger**. Move history is derived
 from them (direction comes from the source/destination location types).
@@ -117,6 +125,37 @@ Any open state ──cancel──▶ cancelled
   add to the destination (virtual locations are ignored). Afterwards every `waiting` document is re-checked and
   promoted to `ready` if it can now be served.
 - Editing a document resets it to `draft`. Done and cancelled documents are immutable.
+
+### Partial validation and backorders
+`POST /operations/{id}/validate` accepts an optional body `{lines: [{line_id, done_qty}], backorder: true}`. Without it everything is
+processed. With it:
+- each `done_qty` must be between 0 and the ordered quantity, and at least one must be above 0 (otherwise 409);
+- availability is tested against the *processed* quantities, so shipping what you have is allowed;
+- lines that fall short keep their original demand in `ordered_qty` and are reduced to what moved (lines with 0 move to the backorder only);
+- `backorder: true` creates a new document (same type, contact, warehouse and locations, `backorder_of_id` set, new reference) holding the
+  remainder, which goes straight to Ready (or Waiting for a delivery that is short); `false` simply drops the remainder;
+- totals and taxes on the finished document reflect what actually moved. Backorders can themselves be validated partially.
+
+### Costing (`stock.apply_costing`)
+Weighted-average cost, applied just *before* quantities move on validation and on adjustments:
+- **stock coming in** (receipt, positive adjustment): `avg = (on_hand × avg + qty × price) / (on_hand + qty)`; into empty stock the average
+  becomes the incoming price. The price is the line's `unit_price` (receipts default to the product's `cost_price`, else its sales price);
+- **stock going out** (delivery, negative adjustment): the current average is stored on the line as `cost_price`, so margin uses the cost at
+  the time of sale; the average itself does not change;
+- **transfers** change nothing.
+`GET /reports/valuation` values on-hand stock at the average; `GET /reports/margin` compares delivery revenue (before tax) with `cost_price`.
+
+### Contacts and GSTIN (`routers/parties.py`)
+A GSTIN must match `NNAAAAANNNNANZN` (2-digit state code from the GST list, 10-character PAN, entity digit, `Z`, check character), and the
+last character must equal the mod-36 check digit computed over the first 14. Receipts only accept suppliers/both and deliveries only
+customers/both. Choosing a contact copies its name onto the document (`contact`) and links `party_id`; free-text contacts still work.
+Contacts follow the same archive/delete rules as other records.
+
+### Low-stock digest (`digest.py`)
+`build_digest` collects products that need reordering (with the same rule as the dashboard, counting incoming receipts) plus the number of
+late receipts/deliveries and deliveries waiting for stock; it returns nothing when there is nothing to say. The scheduler loop wakes every 15
+minutes and calls `run_digest_if_due`: after `DIGEST_HOUR_UTC` it **claims today's date in `app_settings` first** (so restarts and extra workers
+never double-send), then emails each opted-in user separately. HTML values are escaped. Set `DIGEST_ENABLED=false` to disable the loop.
 
 ### Availability and reservation
 `free = on hand at the source location − quantity on OTHER ready OUT/INT documents from that location`.
@@ -209,14 +248,32 @@ All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 
 | POST | `/operations/{id}/todo` | draft → ready (or waiting) |
 | POST | `/operations/{id}/check` | waiting → ready if stock allows |
 | POST | `/operations/{id}/pick`, `/pack` | Deliveries in Ready. Must pick before packing |
-| POST | `/operations/{id}/validate` | ready → done, moves stock (deliveries must be packed) |
+| POST | `/operations/{id}/validate` | ready → done, moves stock (deliveries must be packed). Optional body `{lines: [{line_id, done_qty}], backorder}` for partial validation |
 | POST | `/operations/{id}/cancel` | |
 | POST | `/operations/{id}/duplicate` | New draft copy at current prices |
 | GET | `/contacts` | `?type=` previously used contacts |
 | GET | `/moves` | Ledger rows. `?q=` `?status=` `?direction=in\|out\|transfer` `?type=` `?warehouse_id=` `?location_id=` `?category_id=` |
 
+### Contacts
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/parties` | `?q=` (name/GSTIN/email) `?kind=vendor\|customer` (includes `both`) `?include_archived=true`; each row has `documents`, `total_value`, `last_document` |
+| POST | `/parties` | `name`, `kind`, `gstin`, `email`, `phone`, `address`. 409 on duplicate name, 422 on a bad GSTIN |
+| GET | `/parties/{id}` | Contact plus its 10 latest documents |
+| PUT | `/parties/{id}` | Same body as create |
+| POST | `/parties/{id}/archive`, `/restore` · DELETE `/parties/{id}` | Same rules as other records |
+
+### Reports and notifications
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/reports/valuation` | `?q=` `?warehouse_id=` `?location_id=` `?category_id=` `?include_zero=` → `rows`, `totals`, `by_category` |
+| GET | `/reports/margin` | `?days=30` (1–3650) `?warehouse_id=` `?category_id=` → per-product revenue, cost, margin |
+| GET | `/notifications/preferences` | `{low_stock_digest, schedule, email_configured, email}` |
+| PUT | `/notifications/preferences` | `{low_stock_digest: bool}` |
+| POST | `/notifications/digest/test` | Sends today's digest to the signed-in user only |
+
 ### CSV export
-`GET /export/products.csv` · `/export/stock.csv` · `/export/moves.csv` · `/export/operations.csv`. The list endpoints'
+`GET /export/products.csv` · `/export/stock.csv` · `/export/moves.csv` · `/export/operations.csv` · `/export/valuation.csv` · `/export/margin.csv` · `/export/parties.csv`. The list endpoints'
 filters apply (`q`, `status`, `type`, `warehouse_id`, `location_id`, `category_id`, …). Files start with a UTF-8 BOM and
 text cells beginning with `=`, `+`, `-` or `@` are prefixed with `'` to defuse spreadsheet formulas.
 
@@ -284,8 +341,8 @@ If you outgrow this, adopt Alembic.
 docker compose exec backend python -m pytest tests -q
 ```
 
-The suite (`backend/tests/`, 68 tests) drives the real API through FastAPI's `TestClient` against a separate Postgres
-database, `stocksense_test`, which is created on first run and rebuilt every run. OTP emails are captured instead of sent.
+The suite (`backend/tests/`, 113 tests) drives the real API through FastAPI's `TestClient` against a separate Postgres
+database, `stocksense_test`, which is created on first run and rebuilt every run. Emails are captured instead of sent, and the developer's real Brevo key is blanked and guarded so a test can never send one.
 
 | File | Covers |
 |---|---|
@@ -294,7 +351,11 @@ database, `stocksense_test`, which is created on first run and rebuilt every run
 | `test_taxes.py` | default / category / explicit tax, totals, rate snapshots on validated documents |
 | `test_inventory_rules.py` | multi-warehouse rules, reorder suggestions, categories, search, dashboard filters |
 | `test_lifecycle_and_csv.py` | archive and delete rules, CSV exports, formula sanitising, import preview and apply |
+| `test_backorders.py` | partial receipts/deliveries, backorders, quantity checks, chains, pick-and-pack interplay |
+| `test_parties.py` | contacts, GSTIN check digit, contact/document rules, history, archive and delete |
+| `test_valuation.py` | weighted-average cost, valuation and margin reports, purchase vs sales price defaults |
+| `test_digest.py` | preferences, digest content and escaping, once-a-day scheduling, opt-in only |
 
 `tests/helpers.py` has small builders (`product`, `make_op`, `receive`, `ship`, `warehouse`) to keep new tests short.
 
-**Not yet covered:** rate limiting, roles/permissions, audit of who edited what, Alembic migrations, UI tests.
+**Not yet covered:** rate limiting, roles/permissions, audit of who edited what, Alembic migrations, server-side pagination, exact decimal money, UI tests.

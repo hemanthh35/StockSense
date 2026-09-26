@@ -1,10 +1,12 @@
-"""Stock engine: quantities, reservations, references and the operation workflow."""
+"""Stock engine: quantities, reservations, references, costing and the operation workflow."""
 from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import Location, Operation, OperationLine, Product, Sequence, StockQuant, Warehouse
+
+EPS = 1e-9
 
 
 def utcnow() -> datetime:
@@ -28,6 +30,18 @@ def on_hand(db: Session, product_id: int, location_id: int) -> float:
             StockQuant.product_id == product_id, StockQuant.location_id == location_id
         )
     ) or 0.0
+
+
+def total_on_hand(db: Session, product_id: int) -> float:
+    """Units of a product across every stock (internal) location."""
+    return float(
+        db.scalar(
+            select(func.coalesce(func.sum(StockQuant.quantity), 0))
+            .join(Location, Location.id == StockQuant.location_id)
+            .where(StockQuant.product_id == product_id, Location.type == "internal")
+        )
+        or 0
+    )
 
 
 def reserved(db: Session, product_id: int, location_id: int, exclude_op: int | None = None) -> float:
@@ -65,23 +79,44 @@ def add_qty(db: Session, product_id: int, location: Location, delta: float) -> N
     db.flush()
 
 
-def line_shortages(db: Session, op: Operation) -> dict[int, float]:
-    """line id -> missing quantity, for outbound moves from a tracked location."""
+def line_shortages(db: Session, op: Operation, qty: dict[int, float] | None = None) -> dict[int, float]:
+    """line id -> missing quantity, for outbound moves from a tracked location.
+    `qty` lets a caller test different quantities (partial validation) without changing the lines."""
     if op.status in ("done", "cancelled") or op.type not in ("OUT", "INT"):
         return {}
     if op.source_location.type != "internal":
         return {}
+    want = {ln.id: (qty[ln.id] if qty and ln.id in qty else ln.quantity) for ln in op.lines}
     need: dict[int, float] = {}
     for ln in op.lines:
-        need[ln.product_id] = need.get(ln.product_id, 0) + ln.quantity
+        need[ln.product_id] = need.get(ln.product_id, 0) + want[ln.id]
     out = {}
     for ln in op.lines:
         free = free_to_use(db, ln.product_id, op.source_location_id, exclude_op=op.id)
-        if need[ln.product_id] > free + 1e-9:
+        if need[ln.product_id] > free + EPS:
             out[ln.id] = max(need[ln.product_id] - free, 0)
     return out
 
 
+# ------------------------------------------------------------------ costing
+def apply_costing(db: Session, pairs: list[tuple[Product, OperationLine]], src: Location, dst: Location) -> None:
+    """Weighted-average cost. Call BEFORE the quantities move.
+    - stock coming in (receipt, positive adjustment) blends its price into the product's average cost;
+    - stock going out records the current average on the line so margin can be computed later;
+    - transfers change nothing."""
+    coming_in = dst.type == "internal" and src.type != "internal"
+    for product, ln in pairs:
+        if coming_in:
+            incoming = ln.unit_price if ln.unit_price is not None else (product.cost_price or product.unit_cost)
+            before = max(total_on_hand(db, product.id), 0.0)
+            total = before + ln.quantity
+            product.avg_cost = round((before * (product.avg_cost or 0) + ln.quantity * incoming) / total, 4) if total > 0 else incoming
+            ln.cost_price = incoming
+        else:
+            ln.cost_price = product.avg_cost or product.cost_price or product.unit_cost
+
+
+# ------------------------------------------------------------------ workflow
 class WorkflowError(Exception):
     pass
 
@@ -110,22 +145,72 @@ def action_check(db: Session, op: Operation) -> str | None:
     return None
 
 
-def action_validate(db: Session, op: Operation) -> str | None:
+def action_validate(
+    db: Session, op: Operation, done: dict[int, float] | None = None, backorder: bool = True
+) -> str | None:
+    """Ready -> Done. `done` maps line id -> quantity actually received/shipped (default: everything).
+    A shortfall either creates a backorder for the rest (default) or cancels the remainder."""
     if op.status != "ready":
         raise WorkflowError("Only ready records can be validated")
-    if line_shortages(db, op):
+
+    qty = {ln.id: ln.quantity for ln in op.lines}
+    for lid, q in (done or {}).items():
+        if lid not in qty:
+            raise WorkflowError("That line does not belong to this record")
+        if q < 0:
+            raise WorkflowError("Quantities can't be negative")
+        if q > qty[lid] + EPS:
+            raise WorkflowError("You can't process more than was ordered")
+        qty[lid] = q
+    if not any(q > EPS for q in qty.values()):
+        raise WorkflowError("Enter a quantity for at least one product")
+
+    if line_shortages(db, op, qty):
         op.status = "waiting"
         op.picked_at = op.packed_at = None
         return "Not enough stock - moved back to Waiting"
     if op.type == "OUT" and not op.packed_at:
         raise WorkflowError("Pick and pack the items before validating the delivery")
+
+    partial = any(qty[ln.id] < ln.quantity - EPS for ln in op.lines)
+    remainder = []
+    if partial:
+        for ln in list(op.lines):
+            short = ln.quantity - qty[ln.id]
+            if short > EPS:
+                remainder.append((ln.product_id, short, ln.unit_price, ln.tax_rate, ln.tax_name))
+                ln.ordered_qty = ln.quantity
+                if qty[ln.id] <= EPS:
+                    op.lines.remove(ln)  # nothing moved for this line, it lives on in the backorder
+                else:
+                    ln.quantity = qty[ln.id]
+        db.flush()
+
+    apply_costing(db, [(ln.product, ln) for ln in op.lines], op.source_location, op.dest_location)
     for ln in op.lines:
         add_qty(db, ln.product_id, op.source_location, -ln.quantity)
         add_qty(db, ln.product_id, op.dest_location, ln.quantity)
     op.status = "done"
     op.done_at = utcnow()
+
+    message = None
+    if partial and backorder:
+        bo = Operation(
+            reference=next_reference(db, op.warehouse, op.type), type=op.type, status="draft", contact=op.contact,
+            party_id=op.party_id, schedule_date=op.schedule_date, responsible_id=op.responsible_id,
+            warehouse_id=op.warehouse_id, source_location_id=op.source_location_id, dest_location_id=op.dest_location_id,
+            backorder_of_id=op.id,
+        )
+        for pid, q, price, rate, name in remainder:
+            bo.lines.append(OperationLine(product_id=pid, quantity=q, unit_price=price, tax_rate=rate, tax_name=name))
+        db.add(bo)
+        db.flush()
+        action_todo(db, bo)
+        message = f"Validated part of the order. Backorder {bo.reference} created for the rest."
+    elif partial:
+        message = "Validated part of the order. The remainder was cancelled."
     promote_waiting(db)
-    return None
+    return message
 
 
 def action_pick(db: Session, op: Operation) -> None:
@@ -188,8 +273,10 @@ def adjust(db: Session, product: Product, location: Location, counted: float, us
         dest_location_id=dst.id,
         done_at=utcnow(),
     )
-    op.lines.append(OperationLine(product_id=product.id, quantity=abs(delta), unit_price=product.unit_cost))
+    line = OperationLine(product_id=product.id, quantity=abs(delta), unit_price=product.cost_price or product.unit_cost)
+    op.lines.append(line)
     db.add(op)
+    apply_costing(db, [(product, line)], src, dst)
     add_qty(db, product.id, location, delta)
     promote_waiting(db)
     return op

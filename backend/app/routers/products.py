@@ -21,6 +21,7 @@ class ProductIn(BaseModel):
     category_id: int | None = None
     uom: str = "Unit"
     unit_cost: float = 0
+    cost_price: float = 0  # purchase price; 0 = same as unit_cost
     reorder_min: float = 0
     reorder_qty: float = 0
     hsn_code: str | None = None
@@ -47,6 +48,8 @@ def product_out(db: Session, p: Product, on_hand: float | None = None) -> dict:
         "category": p.category.name if p.category else None,
         "uom": p.uom,
         "unit_cost": p.unit_cost,
+        "cost_price": p.cost_price,
+        "avg_cost": p.avg_cost,
         "reorder_min": p.reorder_min,
         "reorder_qty": p.reorder_qty,
         "hsn_code": p.hsn_code,
@@ -56,6 +59,10 @@ def product_out(db: Session, p: Product, on_hand: float | None = None) -> dict:
         "on_hand": on_hand,
         "low_stock": on_hand <= p.reorder_min,
     }
+
+
+def total_qty_zero(db: Session, p: Product) -> bool:
+    return stock.total_on_hand(db, p.id) <= 0
 
 
 def _resolve_tax_id(db: Session, body: ProductIn) -> int | None:
@@ -149,7 +156,8 @@ def create_product(body: ProductIn, db: Session = Depends(get_db), user: User = 
         raise HTTPException(409, "SKU already exists")
     p = Product(
         name=body.name.strip(), sku=sku, category_id=body.category_id, uom=body.uom or "Unit",
-        unit_cost=body.unit_cost, reorder_min=body.reorder_min, reorder_qty=body.reorder_qty,
+        unit_cost=body.unit_cost, cost_price=body.cost_price, avg_cost=body.cost_price or body.unit_cost,
+        reorder_min=body.reorder_min, reorder_qty=body.reorder_qty,
         hsn_code=(body.hsn_code or "").strip() or None, tax_id=_resolve_tax_id(db, body),
     )
     db.add(p)
@@ -175,6 +183,9 @@ def update_product(pid: int, body: ProductIn, db: Session = Depends(get_db), _: 
         raise HTTPException(409, "SKU already exists")
     p.name, p.sku, p.category_id, p.uom = body.name.strip(), sku, body.category_id, body.uom
     p.unit_cost, p.reorder_min, p.reorder_qty = body.unit_cost, body.reorder_min, body.reorder_qty
+    p.cost_price = body.cost_price
+    if total_qty_zero(db, p):
+        p.avg_cost = body.cost_price or body.unit_cost  # nothing on the shelf, so re-base the average
     p.hsn_code = (body.hsn_code or "").strip() or None
     p.tax_id = _resolve_tax_id(db, body)
     db.commit()

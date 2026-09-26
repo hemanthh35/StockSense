@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useApi } from '../hooks'
 import { Icon } from '../components/icons.jsx'
-import { Empty, PageHeader, STATUS_LABEL, Toast, fmtDate, num, useToast } from '../components/ui.jsx'
+import { Empty, PageHeader, STATUS_LABEL, Toast, fmtDate, money, num, useToast } from '../components/ui.jsx'
 
 const CARD = {
   IN: { title: 'Receipts', icon: 'receive', tint: 'var(--mint-bg)', ink: 'var(--green)', to: '/operations/receipts', verb: 'to receive' },
@@ -49,6 +49,7 @@ function OpCard({ type, d, status }) {
 }
 
 const KPIS = [
+  ['stock_value', 'Stock value'],
   ['total_products_in_stock', 'Products in stock'],
   ['low_stock', 'Low stock', 'warn'],
   ['out_of_stock', 'Out of stock', 'neg'],
@@ -129,7 +130,7 @@ export default function Dashboard() {
             {KPIS.map(([k, label, tone]) => (
               <div key={k} className="kpi">
                 <small>{label}</small>
-                <b className={data.kpis[k] > 0 ? tone : ''}>{data.kpis[k]}</b>
+                <b className={data.kpis[k] > 0 ? tone : ''}>{k === 'stock_value' ? money(data.kpis[k]) : data.kpis[k]}</b>
               </div>
             ))}
           </div>

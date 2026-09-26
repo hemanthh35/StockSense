@@ -25,6 +25,8 @@ def seed_taxes(db: Session) -> None:
             ln.unit_price = prod.unit_cost
             ln.tax_rate = prod.tax.rate if prod.tax else 0
             ln.tax_name = prod.tax.name if prod.tax else None
+    for p in db.scalars(select(Product).where(Product.avg_cost == 0, (Product.unit_cost > 0) | (Product.cost_price > 0))):
+        p.avg_cost = p.cost_price or p.unit_cost  # products that pre-date costing start at their price
     db.commit()
 
 

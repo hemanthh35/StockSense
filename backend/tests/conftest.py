@@ -17,6 +17,9 @@ def _prepare_database() -> None:
     os.environ["DATABASE_URL"] = f"{base}/{TEST_DB}"  # must be set before the app is imported
 
 
+os.environ["DIGEST_ENABLED"] = "false"  # no background e-mail loop while testing
+os.environ["BREVO_API_KEY"] = ""  # the developer's real key must never be used by tests
+os.environ["BREVO_SENDER_EMAIL"] = ""
 _prepare_database()
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -78,3 +81,11 @@ def sent_otps(monkeypatch):
     sent = []
     monkeypatch.setattr("app.routers.auth.send_otp", lambda email, code: sent.append((email, code)) or True)
     return sent
+
+
+@pytest.fixture(autouse=True)
+def no_real_email(monkeypatch):
+    """Belt and braces: if anything tries to reach Brevo during a test, fail loudly."""
+    def boom(*a, **k):
+        raise RuntimeError("a test tried to send a real email")
+    monkeypatch.setattr("app.mail.httpx.post", boom)

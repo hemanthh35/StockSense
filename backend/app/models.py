@@ -14,6 +14,7 @@ class User(Base):
     login_id: Mapped[str] = mapped_column(String(12), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    low_stock_digest: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -25,6 +26,29 @@ class OtpCode(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     used: Mapped[bool] = mapped_column(default=False)
+
+
+class Setting(Base):
+    """Tiny key/value store for system state such as "digest last sent"."""
+
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[str] = mapped_column(String(200), default="")
+
+
+class Party(Base):
+    """A supplier and/or customer. kind: vendor | customer | both."""
+
+    __tablename__ = "parties"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150), unique=True)
+    kind: Mapped[str] = mapped_column(String(10), default="both")
+    gstin: Mapped[str | None] = mapped_column(String(15))
+    email: Mapped[str | None] = mapped_column(String(255))
+    phone: Mapped[str | None] = mapped_column(String(30))
+    address: Mapped[str | None] = mapped_column(String(300))
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class Warehouse(Base):
@@ -85,6 +109,8 @@ class Product(Base):
     category: Mapped[Category | None] = relationship()
     uom: Mapped[str] = mapped_column(String(20), default="Unit")
     unit_cost: Mapped[float] = mapped_column(Float, default=0)
+    cost_price: Mapped[float] = mapped_column(Float, default=0)  # default purchase price (falls back to unit_cost)
+    avg_cost: Mapped[float] = mapped_column(Float, default=0)  # weighted average purchase cost
     reorder_min: Mapped[float] = mapped_column(Float, default=0)
     reorder_qty: Mapped[float] = mapped_column(Float, default=0)
     hsn_code: Mapped[str | None] = mapped_column(String(20))
@@ -127,8 +153,11 @@ class Operation(Base):
     done_at: Mapped[datetime | None] = mapped_column(DateTime)
     picked_at: Mapped[datetime | None] = mapped_column(DateTime)
     packed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    party_id: Mapped[int | None] = mapped_column(ForeignKey("parties.id"))
+    backorder_of_id: Mapped[int | None] = mapped_column(ForeignKey("operations.id"))
 
     responsible: Mapped[User | None] = relationship()
+    party: Mapped[Party | None] = relationship()
     warehouse: Mapped[Warehouse] = relationship()
     source_location: Mapped[Location] = relationship(foreign_keys=[source_location_id])
     dest_location: Mapped[Location] = relationship(foreign_keys=[dest_location_id])
@@ -146,5 +175,7 @@ class OperationLine(Base):
     unit_price: Mapped[float] = mapped_column(Float, default=0)
     tax_rate: Mapped[float] = mapped_column(Float, default=0)
     tax_name: Mapped[str | None] = mapped_column(String(60))
+    ordered_qty: Mapped[float | None] = mapped_column(Float)  # original demand when a line was validated partially
+    cost_price: Mapped[float | None] = mapped_column(Float)  # average cost when the line moved (for margin)
     operation: Mapped[Operation] = relationship(back_populates="lines")
     product: Mapped[Product] = relationship()

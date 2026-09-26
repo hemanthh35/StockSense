@@ -19,14 +19,14 @@ Built for the Odoo × GCET hackathon (problem statement: *StockSense*).
 | **Validation / config** | Pydantic 2, pydantic-settings | `.env`-driven settings |
 | **Database** | PostgreSQL 16 (Docker) | Data persisted in a named volume |
 | **Auth** | JWT (PyJWT) + bcrypt | Bearer tokens, 12 h default lifetime |
-| **Email (OTP)** | [Brevo](https://www.brevo.com) transactional email API via `httpx` | Falls back to logging the OTP when no key is set |
+| **Email (OTP, digest)** | [Brevo](https://www.brevo.com) transactional email API via `httpx` | Falls back to logging when no key is set |
 | **Infra** | Docker + Docker Compose | One command starts DB, API and web app |
 
 ### Third-party services and dependencies
 
 | Service | Needed for | Required? |
 |---|---|---|
-| **Brevo** (API key + a verified sender) | Emailing the password-reset OTP | Optional for development. Without it the OTP is printed in the backend logs. |
+| **Brevo** (API key + a verified sender) | Password-reset OTP and the daily low-stock digest | Optional for development. Without it the OTP is printed in the backend logs and no digest is sent. |
 | **Google Fonts** | Geist / Geist Mono fonts in the browser | Optional. The UI falls back to system fonts offline. |
 | Docker Desktop | Running everything | Yes |
 
@@ -73,7 +73,7 @@ time to reset. A click-by-click script is in **[DEMO.md](DEMO.md)**.
 docker compose exec backend python -m pytest tests -q
 ```
 
-68 tests run against a separate throw-away database (`stocksense_test`), so your data is never touched.
+113 tests run against a separate throw-away database (`stocksense_test`), so your data is never touched.
 
 Handy commands:
 
@@ -93,7 +93,9 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 | `ACCESS_TOKEN_MINUTES` | Login lifetime | `720` |
 | `BREVO_API_KEY` | Brevo API key (Brevo → SMTP & API → API Keys) | empty |
 | `BREVO_SENDER_EMAIL` | A sender verified in Brevo | empty |
-| `BREVO_SENDER_NAME` | Display name on OTP emails | `StockSense` |
+| `BREVO_SENDER_NAME` | Display name on outgoing emails | `StockSense` |
+| `DIGEST_ENABLED` | Run the daily low-stock digest scheduler | `true` |
+| `DIGEST_HOUR_UTC` | Hour (UTC) after which the digest is sent, once a day | `3` (08:30 IST) |
 
 `.env` is git-ignored. Never commit real keys.
 
@@ -130,9 +132,29 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
   Once Ready, a delivery is **picked, then packed, then validated**; validation is refused until both are done.
 - **Internal transfers**: move stock between locations, including across warehouses.
 - **Adjustments**: enter a counted quantity from the Stock page; the difference is logged.
-- Every state can also be **Cancelled**. Completed documents can be printed.
+- **Partial receipts and deliveries (backorders):** validate with the quantities that really arrived or shipped. The
+  rest either continues on an automatic **backorder** document (linked both ways) or is cancelled. Totals and taxes follow
+  what actually moved.
+- Every state can also be **Cancelled**. Completed documents can be printed (with the supplier/customer, address and GSTIN).
 - Search across documents by **reference, contact, product name or SKU**.
 - Duplicate an order into a fresh draft; contacts are suggested from earlier orders.
+
+**Contacts (suppliers and customers)**
+- Saved contacts with type (supplier / customer / both), **GSTIN** (format, state code and check digit validated; the state
+  is derived), email, phone and address. Receipts pick a supplier, deliveries a customer; the name, address and GSTIN flow
+  onto the document and its printout. Each contact shows its document history and totals.
+- Add a contact on the fly from a receipt or delivery; archive or delete like other records; export to CSV.
+
+**Valuation and margin**
+- Products have a **sales price** and a **purchase cost**. Receipts default to the purchase cost and deliveries to the sales price.
+- Stock is valued at **weighted-average cost**: each receipt blends its price into the average, deliveries record the average at
+  that moment. **Stock → Valuation** shows stock value, value at sales price and potential margin by product and category;
+  **Stock → Margin** shows revenue, cost and margin per product for the last 7 / 30 / 90 days or 12 months. Both export to CSV,
+  and the dashboard shows the total stock value.
+
+**Notifications**
+- An optional **daily low-stock email** (My profile): what to reorder, what is late and what is waiting for stock. It is sent
+  once a day after a configured hour, only to people who opted in, and there is a "send me today's digest now" button.
 
 **Taxes / GST**
 - Tax master with GST 0 / 5 / 12 / 18 / 28 % pre-loaded. Add any new slab or other tax at any time
@@ -194,10 +216,12 @@ StockSense/
 │       ├── pricing.py        # tax resolution + document totals
 │       ├── filters.py        # filters shared by dashboard, lists, moves
 │       ├── lifecycle.py      # can this be archived / deleted? (stock, open documents, history)
+│       ├── digest.py         # daily low-stock email: build, render, once-a-day scheduling
 │       ├── seed.py           # first-run data + GST slabs + backfill
 │       ├── demo.py           # `python -m app.demo`: presentation dataset
-│       └── routers/          # auth, settings, products, operations, inventory, exports
-│   └── tests/                # pytest suite (68 tests, own database)
+│       └── routers/          # auth, settings, products, parties, operations, inventory,
+│                             # reports, exports, notifications
+│   └── tests/                # pytest suite (113 tests, own database)
 ├── DEMO.md                   # 6-minute demo script
 └── frontend/                 # React + Vite app
     ├── vite.config.js        # dev server + /api proxy
@@ -206,9 +230,11 @@ StockSense/
         ├── api.js            # fetch wrapper with JWT
         ├── hooks.js          # useApi, useDebounced
         ├── styles.css        # design tokens + components
-        ├── components/       # Layout, ui (pager, modal, stepper…), icons, CategoryManager
+        ├── components/       # Layout, ui (pager, modal, stepper…), icons, CategoryManager,
+                              # PartyModal, ProductImport, Lifecycle
         └── pages/            # Auth, Dashboard, Operations, OperationDetail, Catalog (products + stock),
-                              # MoveHistory, Settings (warehouses, locations), Taxes, Profile
+                              # StockReports (valuation, margin), Contacts, MoveHistory,
+                              # Settings (warehouses, locations), Taxes, Profile
 ```
 
 The frontend talks to the API only through `/api/...`; Vite proxies that to the backend
@@ -224,12 +250,14 @@ Interactive docs: **http://localhost:8000/docs**. Everything except `/auth/*` an
 | Area | Endpoints |
 |---|---|
 | Auth | `POST /auth/signup`, `/auth/login`, `/auth/forgot-password`, `/auth/reset-password`, `GET /auth/me` |
-| Catalogue | `/products`, `/categories`, `/taxes`, `/category-taxes` |
+| Catalogue | `/products`, `/categories`, `/taxes`, `/category-taxes`, `/parties` (contacts) |
 | Structure | `/warehouses`, `/locations` |
-| Operations | `/operations`, `/operations/{id}/{todo,check,pick,pack,validate,cancel,duplicate}`, `/contacts`, `/moves` |
+| Operations | `/operations`, `/operations/{id}/{todo,check,pick,pack,validate,cancel,duplicate}` (`validate` takes optional per-line quantities), `/contacts`, `/moves` |
 | Inventory | `/stock`, `/stock/adjust`, `/dashboard`, `/reorder/suggestions`, `/reorder/receipt` |
+| Reports | `GET /reports/valuation`, `GET /reports/margin` |
+| Notifications | `GET/PUT /notifications/preferences`, `POST /notifications/digest/test` |
 | Lifecycle | `POST /{products,locations,warehouses}/{id}/{archive,restore}`, `DELETE` on the same |
-| CSV | `GET /export/{products,stock,moves,operations}.csv`, `POST /products/import` |
+| CSV | `GET /export/{products,stock,moves,operations,valuation,margin,parties}.csv`, `POST /products/import` |
 | Account | `PUT /auth/me`, `POST /auth/change-password` |
 
 ---
@@ -242,10 +270,14 @@ Interactive docs: **http://localhost:8000/docs**. Everything except `/auth/*` an
 - **Docker runs the dev servers** (Uvicorn `--reload`, Vite dev). For production build the frontend
   (`npm run build`) and serve the static files behind a reverse proxy.
 - **Tax model:** intra-state GST (CGST + SGST) is displayed. Inter-state IGST, e-invoicing and GST returns are not implemented.
+- **Costing:** weighted-average only (no FIFO / lot costing). Returns, credit notes, lot/serial numbers and expiry dates are not modelled.
+- **Digest scheduler** runs inside the API process (checked every 15 minutes). It claims the day in the database first, so a restart
+  or a second worker cannot send it twice, but a fleet of workers would be better served by a dedicated job runner.
 - **Roles:** all users have the same permissions. Inventory-manager vs warehouse-staff roles are not modelled.
 - **Pick and pack** is a two-step confirmation on Ready deliveries. There are no pick lists, wave picking or packages.
 - **Pagination** is done in the browser, which is fine for thousands of rows but not millions.
-- **Tests:** the backend has an API-level pytest suite (workflow, taxes, warehouses, reorder, archive/delete, CSV, auth).
+- **Tests:** the backend has an API-level pytest suite (workflow, backorders, taxes, warehouses, reorder, archive/delete, contacts,
+  valuation, digest, CSV, auth).
   The React UI has no automated tests; it was checked by hand in the browser, including phone width and print view.
 - **Security notes:** JWTs live in `localStorage`; there is no rate limiting on login or OTP endpoints beyond the
   5-attempt OTP cap. Add both before going to production.

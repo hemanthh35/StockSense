@@ -16,9 +16,10 @@ from . import pricing, stock
 from .db import SessionLocal, engine
 from .main import MIGRATIONS
 from .models import (
-    Base, Category, Location, Operation, OperationLine, Product, Sequence, StockQuant, Tax, User, Warehouse,
+    Base, Category, Location, Operation, OperationLine, Party, Product, Sequence, StockQuant, Tax, User, Warehouse,
 )
 from .routers.operations import LineIn, _make_lines, _resolve_locations
+from .routers.parties import gstin_check_char
 from .security import hash_secret
 from .seed import seed_taxes, seed_virtual_locations
 
@@ -28,6 +29,20 @@ DEMO_EMAIL = "demo@example.com"
 DEMO_PASSWORD = "Demo@12345"
 
 CATEGORIES = {"Furniture": 18, "Electronics": 18, "Stationery": 12, "Packaging": 12, "Pantry": 5}
+# what we pay, as a share of the sales price, so the margin report has something to show
+COST_RATIO = {"Furniture": 0.62, "Electronics": 0.74, "Stationery": 0.68, "Packaging": 0.60, "Pantry": 0.70}
+
+# name, type, first 14 characters of the GSTIN (the check digit is computed), phone, address
+PARTIES = [
+    ("Office Depot Pvt Ltd", "vendor", "24AABCO4589E1Z", "+91 79 4000 1100", "12 CG Road, Navrangpura, Ahmedabad"),
+    ("Gemini Furniture", "both", "27AAECG4321M1Z", "+91 20 6700 2200", "Baner Road, Pune"),
+    ("Tech Mart", "both", "29AAFCT7788P1Z", "+91 80 4100 3300", "Brigade Road, Bengaluru"),
+    ("Wood Corner", "both", "24AAHFW2210R1Z", "+91 281 2400 440", "Aji GIDC, Rajkot"),
+    ("Lumber Inc", "both", "33AAACL9012B1Z", "+91 44 4200 5500", "Ambattur Industrial Estate, Chennai"),
+    ("Azure Interior", "customer", "27AAJCA5566N1Z", "+91 22 6100 7700", "Andheri East, Mumbai"),
+    ("Deco Addict", "customer", "07AAKCD3344H1Z", "+91 11 4300 8800", "Nehru Place, New Delhi"),
+    ("Ready Mat", "customer", "24AALCR1122G1Z", "+91 261 2200 990", "Sachin GIDC, Surat"),
+]
 
 # sku, name, category, price, hsn, reorder_min, reorder_qty, opening stock, location key
 PRODUCTS = [
@@ -53,7 +68,7 @@ PRODUCTS = [
 
 
 def reset(db) -> None:
-    for model in (OperationLine, Operation, StockQuant, Sequence, Product, Category):
+    for model in (OperationLine, Operation, StockQuant, Sequence, Product, Category, Party):
         db.execute(delete(model))
     db.execute(delete(Location).where(Location.warehouse_id.isnot(None)))
     db.execute(delete(Warehouse))
@@ -89,6 +104,13 @@ def build(db) -> dict:
     for loc in L.values():
         db.refresh(loc)
 
+    parties = {}
+    for name, kind, first14, phone, address in PARTIES:
+        parties[name] = Party(name=name, kind=kind, gstin=first14 + gstin_check_char(first14), phone=phone, address=address,
+                              email=f"accounts@{name.lower().replace(' ', '').replace('pvtltd', '')}.example.com")
+        db.add(parties[name])
+    db.flush()
+
     cats = {}
     for name, rate in CATEGORIES.items():
         cats[name] = Category(name=name, default_tax_id=taxes[f"GST {rate}%"].id)
@@ -98,8 +120,9 @@ def build(db) -> dict:
     # ---- products with opening stock (booked as adjustments, dated a month back)
     P: dict[str, Product] = {}
     for sku, name, cat, price, hsn, rmin, rqty, opening, loc in PRODUCTS:
-        p = Product(name=name, sku=sku, category_id=cats[cat].id, unit_cost=price, hsn_code=hsn, reorder_min=rmin, reorder_qty=rqty,
-                    uom="Unit", tax_id=pricing.auto_tax(db, cats[cat].id).id)
+        cost = round(price * COST_RATIO[cat], 2)
+        p = Product(name=name, sku=sku, category_id=cats[cat].id, unit_cost=price, cost_price=cost, avg_cost=cost, hsn_code=hsn,
+                    reorder_min=rmin, reorder_qty=rqty, uom="Unit", tax_id=pricing.auto_tax(db, cats[cat].id).id)
         db.add(p)
         db.flush()
         P[sku] = p
@@ -111,12 +134,15 @@ def build(db) -> dict:
     db.flush()
 
     # ---- documents
-    def make(kind, lines, contact, days, *, state="done", warehouse=None, src=None, dst=None):
+    def make(kind, lines, contact, days, *, state="done", warehouse=None, src=None, dst=None, partial=None):
         w, s, d = _resolve_locations(db, kind, warehouse.id if warehouse else None, L[src].id if src else None, L[dst].id if dst else None)
         when = today + timedelta(days=days)
+        party = parties.get(contact) if kind in ("IN", "OUT") else None
         op = Operation(reference=stock.next_reference(db, w, kind), type=kind, status="draft", contact=contact, schedule_date=when,
-                       responsible_id=user.id, warehouse_id=w.id, source_location_id=s.id, dest_location_id=d.id)
-        op.lines = _make_lines(db, [LineIn(product_id=P[sku].id, quantity=q) for sku, q in lines])
+                       responsible_id=user.id, warehouse_id=w.id, source_location_id=s.id, dest_location_id=d.id,
+                       party_id=party.id if party else None)
+        # a line is (sku, qty) or (sku, qty, unit_price) when the price paid differs from the default
+        op.lines = _make_lines(db, [LineIn(product_id=P[l[0]].id, quantity=l[1], unit_price=l[2] if len(l) > 2 else None) for l in lines], kind)
         db.add(op)
         db.flush()
         if state in ("ready", "picked", "waiting", "done"):
@@ -128,7 +154,7 @@ def build(db) -> dict:
             if kind == "OUT":
                 stock.action_pick(db, op)
                 stock.action_pack(db, op)
-            stock.action_validate(db, op)
+            stock.action_validate(db, op, {op.lines[i].id: q for i, q in (partial or {}).items()} or None)
             op.done_at = datetime.combine(when, time(11, 30))
         if state == "cancelled":
             stock.action_cancel(db, op)
@@ -136,8 +162,8 @@ def build(db) -> dict:
         return op
 
     # receipts
-    make("IN", [("PAPER01", 100), ("PEN001", 50)], "Office Depot Pvt Ltd", -18)
-    make("IN", [("CHAIR001", 10)], "Gemini Furniture", -12)
+    make("IN", [("PAPER01", 100, 240), ("PEN001", 50)], "Office Depot Pvt Ltd", -18)   # paper bought dearer: the average moves
+    make("IN", [("CHAIR001", 10)], "Gemini Furniture", -12, partial={0: 6})          # 6 of 10 arrived: backorder for 4 is still open
     make("IN", [("CAM001", 10)], "Tech Mart", -9, warehouse=nd)
     make("IN", [("KEYB001", 30)], "Tech Mart", -3, state="ready")           # overdue, and covers the low keyboards
     make("IN", [("SHELF001", 12)], "Wood Corner", 4, state="draft")
@@ -145,7 +171,7 @@ def build(db) -> dict:
     # deliveries that already happened
     make("OUT", [("CHAIR001", 6), ("SHELF001", 2)], "Azure Interior", -15)
     make("OUT", [("MOUSE01", 15)], "Deco Addict", -10)
-    make("OUT", [("BOXM01", 40), ("TAPE001", 30)], "Ready Mat", -6)
+    make("OUT", [("BOXM01", 40), ("TAPE001", 30)], "Ready Mat", -6, partial={1: 20})  # shipped 20 of 30 tape: backorder of 10
     make("OUT", [("MARK01", 20)], "Tech Mart", -2, warehouse=nd, src="ND/B")
     # deliveries in progress
     make("OUT", [("BOXM01", 20), ("BUBBLE1", 5)], "Wood Corner", 0, state="picked")   # picked, still to pack

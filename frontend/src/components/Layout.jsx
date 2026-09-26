@@ -46,6 +46,7 @@ export default function Layout({ user, onLogout }) {
             </Menu>
             <NavLink to="/products" className={cls}>Products</NavLink>
             <NavLink to="/stock" className={cls}>Stock</NavLink>
+            <NavLink to="/contacts" className={cls}>Contacts</NavLink>
             <NavLink to="/moves" className={cls}>Move History</NavLink>
             <Menu trigger={(open, toggle) => <GroupTrigger label="Settings" active={pathname.startsWith('/settings')} open={open} toggle={toggle} />}>
               <MenuItem to="/settings/warehouses" icon="warehouse" title="Warehouse" desc="Names, codes and addresses" />

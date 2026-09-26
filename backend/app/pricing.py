@@ -18,8 +18,13 @@ def auto_tax(db: Session, category_id: int | None) -> Tax | None:
     return default_tax(db)
 
 
-def fill_line(line: OperationLine, product: Product, unit_price: float | None = None) -> None:
-    line.unit_price = product.unit_cost if unit_price is None else unit_price
+def default_price(product: Product, op_type: str | None) -> float:
+    """Receipts are bought at the purchase price; deliveries and the rest use the sales price."""
+    return (product.cost_price or product.unit_cost) if op_type == "IN" else product.unit_cost
+
+
+def fill_line(line: OperationLine, product: Product, unit_price: float | None = None, op_type: str | None = None) -> None:
+    line.unit_price = default_price(product, op_type) if unit_price is None else unit_price
     tax = product.tax if product.tax and product.tax.active else None
     line.tax_rate = tax.rate if tax else 0
     line.tax_name = tax.name if tax else None

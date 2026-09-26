@@ -6,9 +6,10 @@ import { Icon } from '../components/icons.jsx'
 import CategoryManager from '../components/CategoryManager.jsx'
 import ProductImport from '../components/ProductImport.jsx'
 import { ArchivedTag, LifecycleActions } from '../components/Lifecycle.jsx'
-import { Empty, ExportButton, Field, Modal, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
+import StockReports from './StockReports.jsx'
+import { Empty, ExportButton, Field, Modal, PageHeader, Segmented, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
-const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
+const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, cost_price: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
 
 export function Products() {
   const [params, setParams] = useSearchParams()
@@ -41,7 +42,7 @@ export function Products() {
         tax_id: form.tax_id === '' ? null : Number(form.tax_id),
         hsn_code: form.hsn_code || null,
         initial_location_id: form.initial_location_id ? Number(form.initial_location_id) : null,
-        unit_cost: Number(form.unit_cost), reorder_min: Number(form.reorder_min),
+        unit_cost: Number(form.unit_cost), cost_price: Number(form.cost_price || 0), reorder_min: Number(form.reorder_min),
         reorder_qty: Number(form.reorder_qty), initial_stock: Number(form.initial_stock),
       }
       if (form.id) await api(`/products/${form.id}`, { method: 'PUT', body })
@@ -79,9 +80,9 @@ export function Products() {
         </div>
         <div className="table-wrap">
           <table className="rows">
-            <thead><tr><th>Product</th><th>Category</th><th>UoM</th><th>Tax</th><th className="num">Unit cost</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
+            <thead><tr><th>Product</th><th>Category</th><th>UoM</th><th>Tax</th><th className="num">Sales price</th><th className="num">Avg cost</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
             <tbody>
-              {!data && <TableSkeleton cols={7} />}
+              {!data && <TableSkeleton cols={8} />}
               {pager.slice.map((p) => (
                 <tr key={p.id} style={p.active ? undefined : { opacity: 0.6 }} onClick={() => setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
                   <td className="strong">{p.name} {!p.active && <ArchivedTag />}<span className="sub mono">{p.sku}</span></td>
@@ -89,6 +90,7 @@ export function Products() {
                   <td className="muted">{p.uom}</td>
                   <td>{p.tax ? <span className="tax-tag">{p.tax.name}</span> : <span className="tax-tag none">No tax</span>}</td>
                   <td className="num">{money(p.unit_cost)}</td>
+                  <td className="num muted">{money(p.avg_cost || p.cost_price || p.unit_cost)}</td>
                   <td className={`num ${p.on_hand <= 0 ? 'neg' : p.low_stock ? 'warn' : ''}`}>{num(p.on_hand)}</td>
                   <td className="num muted">{num(p.reorder_min)}</td>
                 </tr>
@@ -135,7 +137,8 @@ export function Products() {
               <div className="inline"><input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="New category name" /><button type="button" className="btn" onClick={addCat}>Add</button></div>
             </Field>
             <Field label="Unit of measure"><input value={form.uom} onChange={set('uom')} /></Field>
-            <Field label="Unit price (₹)" hint="Pre-fills every order line"><div className="prefix"><span>₹</span><input type="number" min="0" step="any" value={form.unit_cost} onChange={set('unit_cost')} /></div></Field>
+            <Field label="Sales price (₹)" hint="Pre-fills deliveries"><div className="prefix"><span>₹</span><input type="number" min="0" step="any" value={form.unit_cost} onChange={set('unit_cost')} /></div></Field>
+            <Field label="Purchase cost (₹)" hint={form.id && form.avg_cost ? `Average cost of stock on the shelf: ₹${Number(form.avg_cost).toLocaleString('en-IN')}` : 'Pre-fills receipts and values your stock. Leave 0 to use the sales price'}><div className="prefix"><span>₹</span><input type="number" min="0" step="any" value={form.cost_price} onChange={set('cost_price')} /></div></Field>
             <Field label="Tax" hint="Applied automatically on receipts and deliveries">
               <select value={form.tax_id} onChange={set('tax_id')}>
                 <option value="">Automatic — {autoTax ? autoTax.name : 'no tax'}</option>
@@ -165,7 +168,7 @@ export function Products() {
   )
 }
 
-export function Stock() {
+function StockLevels({ tabs }) {
   const [q, setQ] = useState('')
   const [wh, setWh] = useState('')
   const dq = useDebounced(q)
@@ -193,6 +196,7 @@ export function Stock() {
         subtitle="Available inventory by product and location. Enter a physical count to correct a quantity — the difference is logged in Move History."
         actions={<ExportButton path="/export/stock.csv" params={{ q: dq, warehouse_id: wh }} filename="stock.csv" onError={(m) => notify(m, 'error')} />}
       />
+      {tabs}
       <div className="card">
         <div className="toolbar">
           <SearchInput value={q} onChange={setQ} placeholder="Search product or SKU" />
@@ -249,4 +253,13 @@ export function Stock() {
       <Toast msg={toast.msg} kind={toast.kind} onClose={close} />
     </>
   )
+}
+
+const STOCK_TABS = [{ value: 'stock', label: 'Availability' }, { value: 'valuation', label: 'Valuation' }, { value: 'margin', label: 'Margin' }]
+
+/** Stock: what you have, what it is worth, and what you earn on it. */
+export function Stock() {
+  const [view, setView] = useState('stock')
+  const tabs = <div style={{ marginBottom: 16 }}><Segmented value={view} onChange={setView} options={STOCK_TABS} /></div>
+  return view === 'stock' ? <StockLevels tabs={tabs} /> : <StockReports view={view} tabs={tabs} />
 }

@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard.jsx'
 import { OperationList } from './pages/Operations.jsx'
 import OperationDetail from './pages/OperationDetail.jsx'
 import { Products, Stock } from './pages/Catalog.jsx'
+import Contacts from './pages/Contacts.jsx'
 import MoveHistory from './pages/MoveHistory.jsx'
 import { Locations, Warehouses } from './pages/Settings.jsx'
 import Profile from './pages/Profile.jsx'
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="/operations/:kind/:id" element={<OperationDetail user={user} />} />
         <Route path="/products" element={<Products />} />
         <Route path="/stock" element={<Stock />} />
+        <Route path="/contacts" element={<Contacts />} />
         <Route path="/moves" element={<MoveHistory />} />
         <Route path="/settings/warehouses" element={<Warehouses />} />
         <Route path="/settings/locations" element={<Locations />} />

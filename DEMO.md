@@ -11,9 +11,10 @@ Open http://localhost:5173 and sign in as **`demo_admin`** (the password is `DEM
 [`backend/app/demo.py`](backend/app/demo.py)). Re-run the `--reset` command any time to put the data back exactly
 as it starts below, for example between two run-throughs.
 
-**What the data contains:** two warehouses (Main Warehouse `WH`, North Depot `ND`), 18 products with HSN codes and
-reorder rules, and about 40 documents in every status: a late receipt, a half-picked delivery, two deliveries
-waiting for stock, a cross-warehouse transfer, a cancelled receipt and a few stock counts.
+**What the data contains:** two warehouses (Main Warehouse `WH`, North Depot `ND`), 18 products with HSN codes, purchase
+costs and reorder rules, 8 suppliers/customers with valid GSTINs, and about 40 documents in every status: a late receipt,
+a half-picked delivery, two deliveries waiting for stock, **two open backorders** (a partial receipt and a partial delivery),
+a cross-warehouse transfer, a cancelled receipt and a few stock counts.
 
 ## The walkthrough
 
@@ -38,6 +39,12 @@ waiting for stock, a cross-warehouse transfer, a cancelled receipt and a few sto
 - Open the Ready delivery for *Azure Interior*: the big button reads **Mark picked**. The workflow won't
   validate a delivery until it's picked and packed.
 
+### 3b. Partial receipt and backorder (45 s)
+- **Operations → Receipts**: open **WH/IN/0003** (4 chairs from *Gemini Furniture*, a backorder of an earlier receipt where
+  only 6 of 10 arrived). Note the **supplier block** with GSTIN and address.
+- Click **Validate partially…**, enter **3**, keep *Create a backorder*, and confirm. The document finishes at "3 of 4 ordered"
+  and a new backorder appears, linked both ways in the header. Stock rose by exactly 3.
+
 ### 4. Tax that never has to be re-entered (45 s)
 - **Products → New product**: choose category *Pantry* and leave Tax on **Automatic**. It resolves to
   **GST 5%** because that category's default is 5%. Save.
@@ -56,6 +63,13 @@ waiting for stock, a cross-warehouse transfer, a cancelled receipt and a few sto
 - **Operations → Receipts → New receipt**: switch **Warehouse** to *North Depot*. The locations change and the
   reference will read `ND/IN/…`.
 
+### 6b. What is my stock worth? (45 s)
+- **Stock → Valuation**: stock value at **weighted-average cost**, value at sales price and potential margin, plus value by
+  category. *A4 Paper* shows an average of ₹226.56: 150 units at ₹217.60 blended with 100 bought later at ₹240.
+- **Stock → Margin**: revenue, cost and margin per product for the last 30 days. Both tabs have **Export CSV**.
+- **Contacts**: open *Gemini Furniture* to see GSTIN (state derived from it), address and every document with totals. Try typing
+  a wrong GSTIN and saving: the check digit is verified.
+
 ### 7. Stock counts and the ledger (45 s)
 - **Stock**: click **Update** on any row, enter the counted quantity, and see the live difference. It is logged
   as an adjustment.
@@ -71,7 +85,7 @@ waiting for stock, a cross-warehouse transfer, a cancelled receipt and a few sto
 - **Products → Categories**: rename or delete categories. A category in use can't be deleted.
 - Open a product with stock and click **Archive**: it's refused with a clear reason. Archived items stay in history
   but disappear from pickers. **Settings → Warehouses / Locations** work the same way.
-- **My profile** (top right): change email and password.
+- **My profile** (top right): change email and password, and switch on the **daily low-stock email**.
 
 ## If something goes wrong
 | Symptom | Fix |

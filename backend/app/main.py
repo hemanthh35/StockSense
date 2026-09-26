@@ -1,12 +1,17 @@
-from contextlib import asynccontextmanager
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
+from .config import settings as app_settings
 from .db import SessionLocal, engine
+from .digest import run_digest_if_due
+from .stock import utcnow
 from .models import Base
-from .routers import auth, exports, inventory, operations, products, settings
+from .routers import auth, exports, inventory, notifications, operations, parties, products, reports, settings
 from .seed import seed
 
 
@@ -23,7 +28,29 @@ MIGRATIONS = [
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE operations ADD COLUMN IF NOT EXISTS picked_at TIMESTAMP",
     "ALTER TABLE operations ADD COLUMN IF NOT EXISTS packed_at TIMESTAMP",
+    "ALTER TABLE operations ADD COLUMN IF NOT EXISTS party_id INTEGER REFERENCES parties(id)",
+    "ALTER TABLE operations ADD COLUMN IF NOT EXISTS backorder_of_id INTEGER REFERENCES operations(id)",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS ordered_qty DOUBLE PRECISION",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS avg_cost DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS low_stock_digest BOOLEAN NOT NULL DEFAULT FALSE",
 ]
+
+
+def _digest_tick() -> None:
+    with SessionLocal() as db:
+        run_digest_if_due(db, utcnow(), app_settings.digest_hour_utc)
+
+
+async def _digest_loop() -> None:
+    """Wake up every 15 minutes; the digest itself is sent at most once a day."""
+    while True:
+        await asyncio.sleep(900)
+        try:
+            await asyncio.to_thread(_digest_tick)
+        except Exception:  # never let a failed email kill the loop
+            logging.getLogger("stocksense").exception("digest check failed")
 
 
 @asynccontextmanager
@@ -34,7 +61,12 @@ async def lifespan(_: FastAPI):
             conn.execute(text(stmt))
     with SessionLocal() as db:
         seed(db)
+    task = asyncio.create_task(_digest_loop()) if app_settings.digest_enabled else None
     yield
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(title="StockSense API", lifespan=lifespan)
@@ -45,7 +77,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (auth, settings, products, operations, inventory, exports):
+for r in (auth, settings, products, parties, operations, inventory, reports, exports, notifications):
     app.include_router(r.router, prefix="/api")
 
 

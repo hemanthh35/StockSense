@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 from .. import stock
 from ..db import get_db
 from ..deps import current_user
-from ..models import Category, Location, Product, Tax, User
+from ..models import Category, Location, Party, Product, Tax, User
 from .inventory import stock_list
 from .operations import list_operations, move_history
+from .parties import party_out, _stats as party_stats
 from .products import product_out
+from .reports import margin_rows, valuation_rows
 
 router = APIRouter(tags=["csv"])
 
@@ -51,9 +53,9 @@ def export_products(include_archived: bool = False, db: Session = Depends(get_db
     rows = []
     for p in db.scalars(stmt):
         o = product_out(db, p)
-        rows.append([p.sku, p.name, o["category"], p.uom, p.unit_cost, p.hsn_code, o["tax"]["name"] if o["tax"] else "None",
+        rows.append([p.sku, p.name, o["category"], p.uom, p.unit_cost, p.cost_price, p.avg_cost, p.hsn_code, o["tax"]["name"] if o["tax"] else "None",
                      p.reorder_min, p.reorder_qty, o["on_hand"], "yes" if p.active else "archived"])
-    return _csv("products.csv", ["sku", "name", "category", "uom", "unit_cost", "hsn_code", "tax", "reorder_min", "reorder_qty", "on_hand", "status"], rows)
+    return _csv("products.csv", ["sku", "name", "category", "uom", "unit_cost", "cost_price", "avg_cost", "hsn_code", "tax", "reorder_min", "reorder_qty", "on_hand", "status"], rows)
 
 
 @router.get("/export/stock.csv")
@@ -88,11 +90,47 @@ def export_operations(type: str | None = None, status: str | None = None, q: str
     return _csv("operations.csv", ["reference", "type", "status", "contact", "schedule_date", "warehouse", "from", "to", "subtotal", "tax", "total", "responsible"], rows)
 
 
+@router.get("/export/valuation.csv")
+def export_valuation(q: str | None = None, warehouse_id: int | None = None, location_id: int | None = None, category_id: int | None = None,
+                     db: Session = Depends(get_db), _: User = Depends(current_user)):
+    rep = valuation_rows(db, q, warehouse_id, location_id, category_id, False)
+    rows = [[r["sku"], r["name"], r["category"], r["on_hand"], r["avg_cost"], r["value"], r["sales_price"], r["retail_value"]] for r in rep["rows"]]
+    t = rep["totals"]
+    rows.append(["TOTAL", "", "", t["on_hand"], "", t["value"], "", t["retail_value"]])
+    return _csv("stock-valuation.csv", ["sku", "product", "category", "on_hand", "avg_cost", "stock_value", "sales_price", "retail_value"], rows)
+
+
+@router.get("/export/margin.csv")
+def export_margin(days: int = 30, warehouse_id: int | None = None, category_id: int | None = None,
+                  db: Session = Depends(get_db), _: User = Depends(current_user)):
+    rep = margin_rows(db, max(1, min(days, 3650)), warehouse_id, category_id)
+    rows = [[r["sku"], r["name"], r["quantity"], r["revenue"], r["cost"], r["margin"], r["margin_pct"]] for r in rep["rows"]]
+    t = rep["totals"]
+    rows.append(["TOTAL", "", "", t["revenue"], t["cost"], t["margin"], t["margin_pct"]])
+    return _csv(f"margin-{days}d.csv", ["sku", "product", "quantity", "revenue", "cost", "margin", "margin_pct"], rows)
+
+
+@router.get("/export/parties.csv")
+def export_parties(kind: str | None = None, include_archived: bool = False, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    stmt = select(Party).order_by(Party.name)
+    if not include_archived:
+        stmt = stmt.where(Party.active.is_(True))
+    if kind in ("vendor", "customer"):
+        stmt = stmt.where(Party.kind.in_([kind, "both"]))
+    stats = party_stats(db)
+    rows = []
+    for p in db.scalars(stmt):
+        o = party_out(p, stats.get(p.id))
+        rows.append([p.name, p.kind, p.gstin, o["state"], p.email, p.phone, p.address, o["documents"], o["total_value"]])
+    return _csv("contacts.csv", ["name", "type", "gstin", "state", "email", "phone", "address", "documents", "total_value"], rows)
+
+
 # ------------------------------------------------------------------ product import
 ALIASES = {
     "product": "name", "product_name": "name", "item": "name",
     "code": "sku", "sku_code": "sku", "product_code": "sku",
-    "unit_price": "unit_cost", "price": "unit_cost", "cost": "unit_cost",
+    "unit_price": "unit_cost", "price": "unit_cost", "sales_price": "unit_cost", "selling_price": "unit_cost",
+    "cost": "cost_price", "purchase_price": "cost_price", "purchase_cost": "cost_price",
     "hsn": "hsn_code", "hsn_sac": "hsn_code", "hsn/sac": "hsn_code", "hsn_sac_code": "hsn_code",
     "gst": "tax", "tax_rate": "tax",
     "unit": "uom", "unit_of_measure": "uom",
@@ -100,7 +138,7 @@ ALIASES = {
     "reorder_quantity": "reorder_qty", "order_qty": "reorder_qty",
     "stock": "initial_stock", "opening_stock": "initial_stock", "qty": "initial_stock", "quantity": "initial_stock",
 }
-NUMERIC = ("unit_cost", "reorder_min", "reorder_qty", "initial_stock")
+NUMERIC = ("unit_cost", "cost_price", "reorder_min", "reorder_qty", "initial_stock")
 
 
 class ImportIn(BaseModel):
@@ -204,9 +242,11 @@ def import_products(body: ImportIn, db: Session = Depends(get_db), user: User = 
                 p.category_id = cat.id if cat else None
             if row.get("uom"):
                 p.uom = row["uom"]
-            for f in ("unit_cost", "reorder_min", "reorder_qty"):
+            for f in ("unit_cost", "cost_price", "reorder_min", "reorder_qty"):
                 if f in nums:
                     setattr(p, f, nums[f])
+            if not existing:
+                p.avg_cost = p.cost_price or p.unit_cost
             if "hsn_code" in row:
                 p.hsn_code = row["hsn_code"] or None
             if tax == "none":

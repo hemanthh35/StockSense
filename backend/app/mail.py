@@ -8,22 +8,24 @@ log = logging.getLogger("stocksense.mail")
 BREVO_URL = "https://api.brevo.com/v3/smtp/email"
 
 
-def send_otp(email: str, code: str) -> bool:
-    """Send the reset OTP through Brevo's transactional email API.
-    Without a configured key the OTP is logged so the flow stays testable locally."""
-    if not (settings.brevo_api_key and settings.brevo_sender_email):
-        log.warning("Brevo not configured - OTP for %s is %s", email, code)
-        print(f"[DEV] OTP for {email}: {code}", flush=True)
+def configured() -> bool:
+    return bool(settings.brevo_api_key and settings.brevo_sender_email)
+
+
+def send_email(to: str | list[str], subject: str, html: str) -> bool:
+    """Send through Brevo's transactional API. Returns True only if Brevo accepted it.
+    Without configuration (or on failure) it returns False so callers can fall back to logging."""
+    recipients = [to] if isinstance(to, str) else list(to)
+    if not recipients:
+        return False
+    if not configured():
+        log.warning("Brevo not configured - not sending %r to %s", subject, recipients)
         return False
     payload = {
         "sender": {"name": settings.brevo_sender_name, "email": settings.brevo_sender_email},
-        "to": [{"email": email}],
-        "subject": "Your StockSense password reset code",
-        "htmlContent": (
-            f"<p>Your StockSense one-time code is:</p>"
-            f"<h2 style='letter-spacing:4px'>{code}</h2>"
-            f"<p>It expires in 10 minutes. If you didn't request this, ignore this email.</p>"
-        ),
+        "to": [{"email": r} for r in recipients],
+        "subject": subject,
+        "htmlContent": html,
     }
     try:
         r = httpx.post(
@@ -36,5 +38,17 @@ def send_otp(email: str, code: str) -> bool:
         return True
     except httpx.HTTPError as e:
         log.error("Brevo send failed: %s", e)
-        print(f"[DEV] Brevo failed, OTP for {email}: {code}", flush=True)
         return False
+
+
+def send_otp(email: str, code: str) -> bool:
+    """Email the reset code. Without Brevo (or if it fails) the code is printed so development never blocks."""
+    html = (
+        "<p>Your StockSense one-time code is:</p>"
+        f"<h2 style='letter-spacing:4px'>{code}</h2>"
+        "<p>It expires in 10 minutes. If you didn't request this, ignore this email.</p>"
+    )
+    if send_email(email, "Your StockSense password reset code", html):
+        return True
+    print(f"[DEV] OTP for {email}: {code}", flush=True)
+    return False

@@ -9,7 +9,8 @@ from .. import pricing, stock
 from ..filters import op_filters
 from ..db import get_db
 from ..deps import current_user
-from ..models import Location, Operation, OperationLine, Product, User, Warehouse
+from ..models import Location, Operation, OperationLine, Party, Product, User, Warehouse
+from .parties import brief as party_brief
 
 router = APIRouter(tags=["operations"])
 
@@ -22,9 +23,22 @@ class LineIn(BaseModel):
     unit_price: float | None = None  # blank = product's unit cost
 
 
+class ValidateLine(BaseModel):
+    line_id: int
+    done_qty: float
+
+
+class ValidateIn(BaseModel):
+    """Optional body for /validate: quantities actually processed, and what to do with the rest."""
+
+    lines: list[ValidateLine] | None = None
+    backorder: bool = True
+
+
 class OperationIn(BaseModel):
     type: str
     contact: str | None = None
+    party_id: int | None = None  # a saved supplier/customer; its name becomes the contact
     schedule_date: date | None = None
     warehouse_id: int | None = None
     source_location_id: int | None = None
@@ -55,6 +69,7 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
         "type_label": TYPES[op.type],
         "status": op.status,
         "contact": op.contact,
+        "party": party_brief(op.party) if op.party else None,
         "schedule_date": op.schedule_date.isoformat() if op.schedule_date else None,
         "late": bool(
             op.schedule_date and op.schedule_date < date.today() and op.status not in ("done", "cancelled")
@@ -75,6 +90,8 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
                 "product_id": ln.product_id,
                 "product": f"[{ln.product.sku}] {ln.product.name}",
                 "quantity": ln.quantity,
+                "ordered_qty": ln.ordered_qty,
+                "cost_price": ln.cost_price,
                 "unit_price": ln.unit_price or 0,
                 "tax_rate": ln.tax_rate or 0,
                 "tax_name": ln.tax_name,
@@ -84,6 +101,14 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
                 "missing": short.get(ln.id, 0),
             }
             for ln in op.lines
+        ]
+        data["backorder_of"] = None
+        if op.backorder_of_id:
+            src = db.get(Operation, op.backorder_of_id)
+            data["backorder_of"] = {"id": src.id, "reference": src.reference, "type": src.type} if src else None
+        data["backorders"] = [
+            {"id": b.id, "reference": b.reference, "status": b.status, "type": b.type}
+            for b in db.scalars(select(Operation).where(Operation.backorder_of_id == op.id).order_by(Operation.id))
         ]
     return data
 
@@ -151,6 +176,22 @@ def _resolve_locations(db: Session, op_type: str, warehouse_id: int | None, src_
     return (wh, vendor, tracked) if op_type == "IN" else (wh, tracked, customer)
 
 
+def _party_for(db: Session, op_type: str, party_id: int | None) -> Party | None:
+    """Look up the chosen contact and make sure it suits the document (suppliers for receipts, customers for deliveries)."""
+    if not party_id or op_type in ("INT", "ADJ"):
+        return None
+    p = db.get(Party, party_id)
+    if not p:
+        raise HTTPException(422, "Unknown contact")
+    if not p.active:
+        raise HTTPException(422, f"{p.name} is archived")
+    if op_type == "IN" and p.kind == "customer":
+        raise HTTPException(422, f"{p.name} is a customer, not a supplier")
+    if op_type == "OUT" and p.kind == "vendor":
+        raise HTTPException(422, f"{p.name} is a supplier, not a customer")
+    return p
+
+
 def _validate_lines(db: Session, lines: list[LineIn]) -> None:
     for ln in lines:
         if ln.quantity <= 0:
@@ -162,12 +203,12 @@ def _validate_lines(db: Session, lines: list[LineIn]) -> None:
             raise HTTPException(422, f"{product.sku} is archived and can't be used on new documents")
 
 
-def _make_lines(db: Session, lines: list[LineIn]) -> list[OperationLine]:
+def _make_lines(db: Session, lines: list[LineIn], op_type: str | None = None) -> list[OperationLine]:
     out = []
     for l in lines:
         product = db.get(Product, l.product_id)
         ln = OperationLine(product_id=product.id, quantity=l.quantity)
-        pricing.fill_line(ln, product, l.unit_price)
+        pricing.fill_line(ln, product, l.unit_price, op_type)
         out.append(ln)
     return out
 
@@ -205,18 +246,20 @@ def create_operation(body: OperationIn, db: Session = Depends(get_db), user: Use
         raise HTTPException(422, "Type must be IN, OUT or INT (use Stock > Update for adjustments)")
     _validate_lines(db, body.lines)
     wh, src, dst = _resolve_locations(db, body.type, body.warehouse_id, body.source_location_id, body.dest_location_id)
+    party = _party_for(db, body.type, body.party_id)
     op = Operation(
         reference=stock.next_reference(db, wh, body.type),
         type=body.type,
         status="draft",
-        contact=body.contact,
+        contact=party.name if party else body.contact,
+        party_id=party.id if party else None,
         schedule_date=body.schedule_date or date.today(),
         responsible_id=user.id,
         warehouse_id=wh.id,
         source_location_id=src.id,
         dest_location_id=dst.id,
     )
-    op.lines = _make_lines(db, body.lines)
+    op.lines = _make_lines(db, body.lines, body.type)
     db.add(op)
     db.commit()
     return op_out(db, _load(db, op.id))
@@ -233,7 +276,9 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
     if op.status not in ("draft", "waiting", "ready"):
         raise HTTPException(409, "Finished records cannot be edited")
     _validate_lines(db, body.lines)
-    op.contact = body.contact
+    party = _party_for(db, op.type, body.party_id)
+    op.party_id = party.id if party else None
+    op.contact = party.name if party else body.contact
     if body.schedule_date:
         op.schedule_date = body.schedule_date
     # the warehouse (and so the reference prefix) is fixed once the document exists
@@ -241,7 +286,7 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
         db, op.type, op.warehouse_id if op.type != "INT" else None, body.source_location_id, body.dest_location_id
     )
     op.source_location_id, op.dest_location_id = src.id, dst.id
-    op.lines = _make_lines(db, body.lines)
+    op.lines = _make_lines(db, body.lines, op.type)
     if op.status != "draft":  # edits invalidate the earlier availability check
         op.status = "draft"
     op.picked_at = op.packed_at = None
@@ -250,7 +295,9 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
 
 
 @router.post("/operations/{op_id}/{action}")
-def operation_action(op_id: int, action: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def operation_action(
+    op_id: int, action: str, body: ValidateIn | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)
+):
     op = _load(db, op_id)
     message = None
     if action == "duplicate":
@@ -261,7 +308,7 @@ def operation_action(op_id: int, action: str, db: Session = Depends(get_db), use
             schedule_date=date.today(), responsible_id=user.id, warehouse_id=op.warehouse_id,
             source_location_id=op.source_location_id, dest_location_id=op.dest_location_id,
         )
-        copy.lines = _make_lines(db, [LineIn(product_id=l.product_id, quantity=l.quantity) for l in op.lines])
+        copy.lines = _make_lines(db, [LineIn(product_id=l.product_id, quantity=l.quantity) for l in op.lines], op.type)
         db.add(copy)
         db.commit()
         return op_out(db, _load(db, copy.id))
@@ -275,7 +322,8 @@ def operation_action(op_id: int, action: str, db: Session = Depends(get_db), use
         elif action == "pack":
             stock.action_pack(db, op)
         elif action == "validate":
-            message = stock.action_validate(db, op)
+            done = {l.line_id: l.done_qty for l in body.lines} if body and body.lines else None
+            message = stock.action_validate(db, op, done, body.backorder if body else True)
         elif action == "cancel":
             stock.action_cancel(db, op)
         else:

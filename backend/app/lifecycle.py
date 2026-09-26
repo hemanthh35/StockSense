@@ -22,6 +22,14 @@ def product_usage(db: Session, pid: int) -> dict:
     return {"on_hand": _on_hand(db, StockQuant.product_id == pid), "open_ops": open_ops, "history": history}
 
 
+def party_usage(db: Session, pid: int) -> dict:
+    return {
+        "on_hand": 0.0,
+        "open_ops": db.scalar(select(func.count()).select_from(Operation).where(Operation.party_id == pid, Operation.status.in_(OPEN))) or 0,
+        "history": db.scalar(select(func.count()).select_from(Operation).where(Operation.party_id == pid)) or 0,
+    }
+
+
 def location_usage(db: Session, lid: int) -> dict:
     touches = or_(Operation.source_location_id == lid, Operation.dest_location_id == lid)
     return {

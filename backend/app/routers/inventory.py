@@ -156,7 +156,7 @@ def reorder_receipt(body: ReorderIn, db: Session = Depends(get_db), user: User =
         schedule_date=date.today(), responsible_id=user.id, warehouse_id=wh.id,
         source_location_id=src.id, dest_location_id=dst.id,
     )
-    op.lines = _make_lines(db, [LineIn(product_id=i["product_id"], quantity=i["suggested_qty"]) for i in items])
+    op.lines = _make_lines(db, [LineIn(product_id=i["product_id"], quantity=i["suggested_qty"]) for i in items], "IN")
     db.add(op)
     db.commit()
     return op_out(db, _load(db, op.id))
@@ -205,10 +205,12 @@ def dashboard(
     low = []
     incoming = _incoming(db, warehouse_id)
     out_of_stock = in_stock = 0
+    stock_value = 0.0
     for p in db.scalars(pstmt):
         qty = totals.get(p.id, 0)
         if qty > 0:
             in_stock += 1
+            stock_value += qty * (p.avg_cost or p.cost_price or p.unit_cost)
         else:
             out_of_stock += 1
         if qty <= p.reorder_min:
@@ -223,6 +225,7 @@ def dashboard(
         "cards": [card(t) for t in shown],
         "kpis": {
             "total_products_in_stock": in_stock,
+            "stock_value": round(stock_value, 2),
             "low_stock": len(low) - out_of_stock,
             "out_of_stock": out_of_stock,
             "pending_receipts": pending["IN"],

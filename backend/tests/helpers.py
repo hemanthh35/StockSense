@@ -73,3 +73,7 @@ def warehouse(api, with_location: bool = True) -> tuple[dict, dict | None]:
     if with_location:
         loc = ok(api.post("/locations", json={"name": "Rack", "short_code": f"R{uid(3)}", "warehouse_id": wh["id"]}), 201)
     return wh, loc
+
+
+def party(api, kind: str = "both", **kw) -> dict:
+    return ok(api.post("/parties", json={"name": f"Party {uid()}", "kind": kind, **kw}), 201)
