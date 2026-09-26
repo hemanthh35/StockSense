@@ -1,13 +1,14 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useApi, useDebounced } from '../hooks'
-import { Search, Toast, useToast, money, num } from '../components/ui.jsx'
+import { Icon } from '../components/icons.jsx'
+import { Empty, Field, Modal, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
 const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
 
 export function Products() {
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('')
   const dq = useDebounced(q)
@@ -17,8 +18,11 @@ export function Products() {
   const [form, setForm] = useState(params.get('new') ? { ...emptyP } : null)
   const [newCat, setNewCat] = useState('')
   const [toast, notify, close] = useToast()
+  const rows = data || []
+  const pager = usePager(rows)
 
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value })
+  const closeForm = () => { setForm(null); if (params.get('new')) setParams({}) }
   const save = async (e) => {
     e.preventDefault()
     try {
@@ -31,7 +35,7 @@ export function Products() {
       }
       if (form.id) await api(`/products/${form.id}`, { method: 'PUT', body })
       else await api('/products', { method: 'POST', body })
-      setForm(null); reload(); notify('Product saved', 'ok')
+      closeForm(); reload(); notify('Product saved', 'ok')
     } catch (x) { notify(x.message, 'error') }
   }
   const addCat = async () => {
@@ -42,68 +46,78 @@ export function Products() {
 
   return (
     <>
-      <div className="head">
-        <h1>Products</h1>
-        <div className="filters">
-          <button className="btn primary" onClick={() => setForm({ ...emptyP })}>New Product</button>
-          <Search value={q} onChange={setQ} placeholder="Search name or SKU…" />
+      <PageHeader
+        title="Products"
+        subtitle="Your catalogue — SKUs, categories, costs and reorder rules."
+        actions={<button className="btn primary" onClick={() => setForm({ ...emptyP })}><Icon name="plus" size={16} />New product</button>}
+      />
+      <div className="card">
+        <div className="toolbar">
+          <SearchInput value={q} onChange={setQ} placeholder="Search name or SKU" />
           <select value={cat} onChange={(e) => setCat(e.target.value)}>
             <option value="">All categories</option>
             {(cats.data || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </div>
+        <div className="table-wrap">
+          <table className="rows">
+            <thead><tr><th>Product</th><th>Category</th><th>UoM</th><th className="num">Unit cost</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
+            <tbody>
+              {!data && <TableSkeleton cols={6} />}
+              {pager.slice.map((p) => (
+                <tr key={p.id} onClick={() => setForm({ ...p, category_id: p.category_id || '' })}>
+                  <td className="strong">{p.name}<span className="sub mono">{p.sku}</span></td>
+                  <td>{p.category ? <span className="tag">{p.category}</span> : <span className="dim">—</span>}</td>
+                  <td className="muted">{p.uom}</td>
+                  <td className="num">{money(p.unit_cost)}</td>
+                  <td className={`num ${p.on_hand <= 0 ? 'neg' : p.low_stock ? 'warn' : ''}`}>{num(p.on_hand)}</td>
+                  <td className="num muted">{num(p.reorder_min)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {data && !rows.length && <Empty icon="box" title={q || cat ? 'No matches' : 'No products yet'} hint={q || cat ? 'Try a different search.' : 'Add your first product to start tracking stock.'} />}
+        <Pager p={pager} />
       </div>
 
       {form && (
-        <form className="card form2" onSubmit={save}>
-          <label>Name<input value={form.name} onChange={set('name')} required /></label>
-          <label>SKU / Code<input value={form.sku} onChange={set('sku')} required /></label>
-          <label>Category
-            <select value={form.category_id} onChange={set('category_id')}>
-              <option value="">None</option>
-              {(cats.data || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </label>
-          <label>New category
-            <span className="inline"><input value={newCat} onChange={(e) => setNewCat(e.target.value)} /><button type="button" className="btn" onClick={addCat}>Add</button></span>
-          </label>
-          <label>Unit of Measure<input value={form.uom} onChange={set('uom')} /></label>
-          <label>Unit cost (Rs)<input type="number" min="0" step="any" value={form.unit_cost} onChange={set('unit_cost')} /></label>
-          <label>Reorder when stock ≤<input type="number" min="0" step="any" value={form.reorder_min} onChange={set('reorder_min')} /></label>
-          <label>Reorder quantity<input type="number" min="0" step="any" value={form.reorder_qty} onChange={set('reorder_qty')} /></label>
-          {!form.id && (
-            <>
-              <label>Initial stock (optional)<input type="number" min="0" step="any" value={form.initial_stock} onChange={set('initial_stock')} /></label>
-              <label>Initial location
-                <select value={form.initial_location_id} onChange={set('initial_location_id')}>
-                  <option value="">Default</option>
-                  {locs.map((l) => <option key={l.id} value={l.id}>{l.full_name}</option>)}
-                </select>
-              </label>
-            </>
-          )}
-          <div className="rowgap full">
-            <button className="btn primary">Save</button>
-            <button type="button" className="btn" onClick={() => setForm(null)}>Discard</button>
-          </div>
-        </form>
+        <Modal
+          title={form.id ? 'Edit product' : 'New product'}
+          subtitle={form.id ? form.sku : 'Add an item to the catalogue.'}
+          onClose={closeForm}
+          footer={<><button className="btn" onClick={closeForm}>Discard</button><button className="btn primary" form="product-form">Save product</button></>}
+        >
+          <form id="product-form" className="form-grid" onSubmit={save}>
+            <Field label="Name"><input value={form.name} onChange={set('name')} required autoFocus /></Field>
+            <Field label="SKU / code"><input value={form.sku} onChange={set('sku')} required className="mono" /></Field>
+            <Field label="Category">
+              <select value={form.category_id} onChange={set('category_id')}>
+                <option value="">None</option>
+                {(cats.data || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Add a category">
+              <div className="inline"><input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="New category name" /><button type="button" className="btn" onClick={addCat}>Add</button></div>
+            </Field>
+            <Field label="Unit of measure"><input value={form.uom} onChange={set('uom')} /></Field>
+            <Field label="Unit cost (₹)"><input type="number" min="0" step="any" value={form.unit_cost} onChange={set('unit_cost')} /></Field>
+            <Field label="Reorder when stock ≤"><input type="number" min="0" step="any" value={form.reorder_min} onChange={set('reorder_min')} /></Field>
+            <Field label="Reorder quantity"><input type="number" min="0" step="any" value={form.reorder_qty} onChange={set('reorder_qty')} /></Field>
+            {!form.id && (
+              <>
+                <Field label="Initial stock" hint="Optional — logged as an adjustment"><input type="number" min="0" step="any" value={form.initial_stock} onChange={set('initial_stock')} /></Field>
+                <Field label="Initial location">
+                  <select value={form.initial_location_id} onChange={set('initial_location_id')}>
+                    <option value="">Default</option>
+                    {locs.map((l) => <option key={l.id} value={l.id}>{l.full_name}</option>)}
+                  </select>
+                </Field>
+              </>
+            )}
+          </form>
+        </Modal>
       )}
-
-      <div className="card">
-        <table className="clickable">
-          <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>UoM</th><th>Unit cost</th><th>On hand</th><th>Reorder at</th></tr></thead>
-          <tbody>
-            {(data || []).map((p) => (
-              <tr key={p.id} onClick={() => setForm({ ...p, category_id: p.category_id || '' })}>
-                <td>{p.sku}</td><td>{p.name}</td><td>{p.category || '—'}</td><td>{p.uom}</td>
-                <td>{money(p.unit_cost)}</td>
-                <td className={p.on_hand <= 0 ? 'red' : p.low_stock ? 'amber' : ''}>{num(p.on_hand)}{p.low_stock && ' ⚠'}</td>
-                <td>{num(p.reorder_min)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
       <Toast msg={toast.msg} kind={toast.kind} onClose={close} />
     </>
   )
@@ -115,65 +129,77 @@ export function Stock() {
   const dq = useDebounced(q)
   const { data, reload } = useApi('/stock', { q: dq, warehouse_id: wh })
   const whs = useApi('/warehouses').data || []
-  const [edit, setEdit] = useState(null) // {product_id, location_id, counted_qty}
+  const [edit, setEdit] = useState(null)
   const [toast, notify, close] = useToast()
+  const rows = data || []
+  const pager = usePager(rows)
 
-  const submit = async () => {
+  const diff = edit ? Number(edit.counted_qty || 0) - edit.current : 0
+  const submit = async (e) => {
+    e.preventDefault()
     try {
-      const r = await api('/stock/adjust', { method: 'POST', body: { ...edit, counted_qty: Number(edit.counted_qty) } })
-      notify(`Stock updated (${r.reference}): ${num(r.before)} → ${num(r.after)}`, 'ok')
+      const r = await api('/stock/adjust', { method: 'POST', body: { product_id: edit.product_id, location_id: edit.location_id, counted_qty: Number(edit.counted_qty) } })
+      notify(diff === 0 ? 'Count matches — no change' : `Stock updated (${r.reference}): ${num(r.before)} → ${num(r.after)}`, 'ok')
       setEdit(null); reload()
     } catch (x) { notify(x.message, 'error') }
   }
 
   return (
     <>
-      <div className="head">
-        <h1>Stock</h1>
-        <div className="filters">
-          <Search value={q} onChange={setQ} placeholder="Search product or SKU…" />
+      <PageHeader title="Stock" subtitle="Available inventory by product and location. Enter a physical count to correct a quantity — the difference is logged in Move History." />
+      <div className="card">
+        <div className="toolbar">
+          <SearchInput value={q} onChange={setQ} placeholder="Search product or SKU" />
           <select value={wh} onChange={(e) => setWh(e.target.value)}>
             <option value="">All warehouses</option>
             {whs.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
           </select>
         </div>
-      </div>
-      <p className="muted">This page contains the warehouse details & location. Enter the counted quantity to update stock — the difference is logged in Move History.</p>
-      <div className="card">
-        <table>
-          <thead><tr><th>Product</th><th>Per unit cost</th><th>On hand</th><th>Free to Use</th><th /></tr></thead>
-          <tbody>
-            {(data || []).map((r) => (
-              <Fragment key={r.product_id}>
-                <tr>
-                  <td>{r.name} <span className="muted small">{r.sku}</span></td>
-                  <td>{money(r.unit_cost)}</td>
-                  <td className={r.on_hand <= 0 ? 'red' : r.low_stock ? 'amber' : ''}>{num(r.on_hand)}</td>
-                  <td>{num(r.free_to_use)}</td>
-                  <td />
-                </tr>
-                {r.locations.map((l) => (
-                  <tr key={`${r.product_id}-${l.location_id}`} className="sub">
-                    <td>↳ {l.location}</td><td />
-                    <td>{num(l.on_hand)}</td><td>{num(l.free_to_use)}</td>
-                    <td>
-                      {edit?.product_id === r.product_id && edit?.location_id === l.location_id ? (
-                        <span className="inline">
-                          <input type="number" min="0" step="any" value={edit.counted_qty} autoFocus onChange={(e) => setEdit({ ...edit, counted_qty: e.target.value })} />
-                          <button className="btn primary" onClick={submit}>Apply</button>
-                          <button className="btn" onClick={() => setEdit(null)}>✕</button>
-                        </span>
-                      ) : (
-                        <a onClick={() => setEdit({ product_id: r.product_id, location_id: l.location_id, counted_qty: l.on_hand })}>Update</a>
-                      )}
-                    </td>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Product</th><th className="num">Per unit cost</th><th className="num">On hand</th><th className="num">Free to use</th><th style={{ width: 110 }} /></tr></thead>
+            <tbody>
+              {!data && <TableSkeleton cols={5} />}
+              {pager.slice.map((r) => (
+                <Fragment key={r.product_id}>
+                  <tr>
+                    <td className="strong">{r.name}<span className="sub mono">{r.sku}</span></td>
+                    <td className="num">{money(r.unit_cost)}</td>
+                    <td className={`num strong ${r.on_hand <= 0 ? 'neg' : r.low_stock ? 'warn' : ''}`}>{num(r.on_hand)}</td>
+                    <td className="num">{num(r.free_to_use)}</td>
+                    <td />
                   </tr>
-                ))}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
+                  {r.locations.map((l) => (
+                    <tr key={l.location_id} className="subrow">
+                      <td><span className="mono">{l.location}</span></td><td />
+                      <td className="num">{num(l.on_hand)}</td><td className="num">{num(l.free_to_use)}</td>
+                      <td className="num"><button className="btn sm" onClick={() => setEdit({ product_id: r.product_id, name: r.name, location_id: l.location_id, location: l.location, current: l.on_hand, counted_qty: l.on_hand })}>Update</button></td>
+                    </tr>
+                  ))}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {data && !rows.length && <Empty icon="box" title="No stock to show" hint="Add products or change the filters." />}
+        <Pager p={pager} sizes={[5, 10, 25]} />
       </div>
+
+      {edit && (
+        <Modal
+          width={440}
+          title="Update stock"
+          subtitle={`${edit.name} · ${edit.location}`}
+          onClose={() => setEdit(null)}
+          footer={<><button className="btn" onClick={() => setEdit(null)}>Cancel</button><button className="btn primary" form="adjust-form">Apply count</button></>}
+        >
+          <form id="adjust-form" className="stack" onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <Field label="Currently on hand"><input disabled value={num(edit.current)} /></Field>
+            <Field label="Counted quantity"><input type="number" min="0" step="any" autoFocus value={edit.counted_qty} onChange={(e) => setEdit({ ...edit, counted_qty: e.target.value })} /></Field>
+            <div className="muted">Difference <span className={`diff ${diff > 0 ? 'pos' : diff < 0 ? 'neg' : ''}`}>{diff > 0 ? '+' : ''}{num(diff)}</span></div>
+          </form>
+        </Modal>
+      )}
       <Toast msg={toast.msg} kind={toast.kind} onClose={close} />
     </>
   )
