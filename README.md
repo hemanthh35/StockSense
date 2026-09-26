@@ -73,7 +73,7 @@ time to reset. A click-by-click script is in **[DEMO.md](DEMO.md)**.
 docker compose exec backend python -m pytest tests -q
 ```
 
-113 tests run against a separate throw-away database (`stocksense_test`), so your data is never touched.
+169 tests run against a separate throw-away database (`stocksense_test`), so your data is never touched.
 
 Handy commands:
 
@@ -89,7 +89,10 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 | Variable | Purpose | Default in `.env.example` |
 |---|---|---|
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Database credentials | `stocksense` |
-| `SECRET_KEY` | Signs JWTs. **Change it.** Generate with `openssl rand -base64 32` | placeholder |
+| `SECRET_KEY` | Signs JWTs. **Change it.** Generate with `openssl rand -base64 48` (32+ characters) | placeholder |
+| `APP_ENV` | `development` or `production`. Production refuses weak secrets at startup | `development` |
+| `CORS_ORIGINS` | Comma-separated origins allowed to call the API | `http://localhost:5173,http://127.0.0.1:5173` |
+| `RATE_LIMIT_ENABLED` | Turn the login / sign-up / OTP rate limits on or off | `true` |
 | `ACCESS_TOKEN_MINUTES` | Login lifetime | `720` |
 | `BREVO_API_KEY` | Brevo API key (Brevo → SMTP & API → API Keys) | empty |
 | `BREVO_SENDER_EMAIL` | A sender verified in Brevo | empty |
@@ -125,7 +128,7 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 - **CSV import** of products (matched by SKU) with a row-by-row preview before anything is written.
 - Stock availability per location.
 
-**Operations** (list and kanban views, search, status and warehouse filters, pagination)
+**Operations** (list and kanban views, search, status and warehouse filters, server-side pagination)
 - **Receipts** (incoming): `Draft → Ready → Done`. Validating adds stock.
 - **Deliveries** (outgoing): `Draft → Waiting → Ready → Done`. Validating removes stock.
   If stock is short the line turns red, a notification shows, and the order waits until stock arrives.
@@ -162,6 +165,11 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 - A product's tax resolves automatically: its own tax, else its category default, else the global default.
 - Orders pre-fill unit price and tax from the product and show a CGST / SGST split and grand total.
 - Each order line stores the rate it was created with, so validated documents never change if rates change later.
+
+**Access and audit**
+- Three roles (warehouse staff, inventory manager, administrator) with server-enforced permissions and a Users page for admins.
+- An **activity log** of every change with before/after values, plus a per-document history panel.
+- **Conflict protection** so two people editing the same record can't silently overwrite each other.
 
 **Multi-warehouse**
 - Warehouses and locations (Settings). Receipts and deliveries are created inside a chosen warehouse,
@@ -216,12 +224,18 @@ StockSense/
 │       ├── pricing.py        # tax resolution + document totals
 │       ├── filters.py        # filters shared by dashboard, lists, moves
 │       ├── lifecycle.py      # can this be archived / deleted? (stock, open documents, history)
+│       ├── pagination.py     # optional ?page= / ?page_size= envelope
+│       ├── queries.py        # set-based stock / reservation / incoming queries
+│       ├── audit.py          # activity log model + record()/diff()
+│       ├── conflict.py       # optimistic-locking version checks
+│       ├── ratelimit.py      # sliding-window limiter for auth endpoints
+│       ├── migrations.py     # idempotent schema upgrades (columns, decimals, indexes, checks)
 │       ├── digest.py         # daily low-stock email: build, render, once-a-day scheduling
 │       ├── seed.py           # first-run data + GST slabs + backfill
 │       ├── demo.py           # `python -m app.demo`: presentation dataset
 │       └── routers/          # auth, settings, products, parties, operations, inventory,
 │                             # reports, exports, notifications
-│   └── tests/                # pytest suite (113 tests, own database)
+│   └── tests/                # pytest suite (169 tests, own database) + bench_scale.py
 ├── DEMO.md                   # 6-minute demo script
 └── frontend/                 # React + Vite app
     ├── vite.config.js        # dev server + /api proxy
@@ -234,7 +248,7 @@ StockSense/
                               # PartyModal, ProductImport, Lifecycle
         └── pages/            # Auth, Dashboard, Operations, OperationDetail, Catalog (products + stock),
                               # StockReports (valuation, margin), Contacts, MoveHistory,
-                              # Settings (warehouses, locations), Taxes, Profile
+                              # Settings (warehouses, locations), Taxes, Users, Activity, Profile
 ```
 
 The frontend talks to the API only through `/api/...`; Vite proxies that to the backend
@@ -259,28 +273,94 @@ Interactive docs: **http://localhost:8000/docs**. Everything except `/auth/*` an
 | Lifecycle | `POST /{products,locations,warehouses}/{id}/{archive,restore}`, `DELETE` on the same |
 | CSV | `GET /export/{products,stock,moves,operations,valuation,margin,parties}.csv`, `POST /products/import` |
 | Account | `PUT /auth/me`, `POST /auth/change-password` |
+| Admin | `GET /users`, `PUT /users/{id}` (admin) · `GET /audit` (manager) · `GET /operations/{id}/history` |
+
+List endpoints (`products`, `stock`, `operations`, `moves`, `parties`, `reports/*`, `reorder/suggestions`) take optional
+`?page=1&page_size=25` (max 200) and then answer `{items, total, page, page_size, pages}`; without `page` they return the plain list as before.
+`PUT`s accept an optional `version` and workflow actions an optional `?version=`; a stale value gets a 409.
+
+---
+
+## Performance
+
+Measured with `backend/tests/bench_scale.py` on a synthetic dataset of **8,000 products, 30,000 documents and 75,000
+document lines** (one laptop, in-process, warm database). "Before" is the code as it stood before the scale work, and every
+screen now asks for one 25-row page.
+
+| Endpoint | Before | After (25-row page) |
+|---|---|---|
+| `GET /stock` | did not finish in 60 s | **39 ms** |
+| `GET /products` | 8,321 ms · 2.9 MB | **41 ms** · 9 KB |
+| `GET /operations` | 12,582 ms · 19 MB | **64 ms** · 16 KB |
+| `GET /moves` | 7,075 ms · 15 MB | **87 ms** · 6 KB |
+| `GET /reports/margin` (12 months) | 8,476 ms | **161 ms** |
+| `GET /reports/valuation` | 693 ms | **130 ms** |
+| `GET /parties` | 192 ms | **31 ms** |
+| `GET /dashboard` (no pagination needed) | 649 ms | **134 ms** |
+
+What changed: list endpoints page in the database (`LIMIT/OFFSET` plus a `COUNT`), the per-product and
+per-product-and-location queries became a handful of set-based queries (`app/queries.py`), the dashboard and reports are
+computed with grouped SQL instead of Python loops, and every foreign key and hot filter column is indexed. Run
+`docker compose exec backend python tests/bench_scale.py --rebuild` to reproduce it (the first run builds the dataset in its
+own `stocksense_bench` database).
+
+---
+
+## Security and access
+
+**Roles.** The first person to sign up becomes the **administrator**; everyone after starts as **warehouse staff** until an
+admin promotes them (Settings → Users). The server enforces the rules; the UI simply hides what you can't use.
+
+| | Staff | Manager | Admin |
+|---|:-:|:-:|:-:|
+| See everything (products, stock, documents, contacts, reports, move history) | ✓ | ✓ | ✓ |
+| Count stock (adjustments) | ✓ | ✓ | ✓ |
+| Create and edit **internal transfers** | ✓ | ✓ | ✓ |
+| Move any document through its stages (To do, check, pick, pack, validate) | ✓ | ✓ | ✓ |
+| Create, edit, cancel, duplicate **receipts and deliveries** | | ✓ | ✓ |
+| Products, categories, contacts, CSV import, reorder receipts, archive / delete | | ✓ | ✓ |
+| Read the **activity log** | | ✓ | ✓ |
+| Warehouses, locations, taxes, users | | | ✓ |
+
+**Other protections**
+- **Activity log:** every change is recorded (who, when, what, before and after) in the same transaction as the change, and
+  each document shows its own history.
+- **Conflict protection:** products, contacts and documents carry a version. Saving from an out-of-date screen is refused with
+  "changed by someone else, reload" instead of silently overwriting their work.
+- **No overselling:** stock rows are locked while availability is checked, and the database itself refuses negative stock.
+- **Exact money:** amounts are stored as decimals and summed in `Decimal`, rounded half-up to whole paise, so totals never drift.
+- **Rate limits:** login, sign-up and the password-reset endpoints are limited per person and per address; one inbox can't be
+  flooded with codes. Reset emails are sent after the response, so the reply doesn't reveal whether an address exists.
+- **Input limits:** lengths, ranges and list sizes are validated before anything reaches the database.
+- **Secure by default:** with `APP_ENV=production` the API refuses to start with a placeholder or short `SECRET_KEY`;
+  CORS origins come from `CORS_ORIGINS`; deactivating a user invalidates their token immediately.
+
+**Before going live:** set `APP_ENV=production`, a real `SECRET_KEY`, your `CORS_ORIGINS`, serve over HTTPS, build the frontend
+(`npm run build`) instead of running the dev server, and put the API behind a reverse proxy. The in-process rate limiter is per
+worker; with several workers use a shared store such as Redis.
 
 ---
 
 ## Design decisions and known limitations
 
-- **Schema management:** tables are created on startup with `create_all`, and later column additions are
-  applied by small idempotent `ALTER TABLE … IF NOT EXISTS` statements in `main.py`. This keeps setup to one
-  command for a hackathon. For production, switch to Alembic migrations.
+- **Schema management:** tables are created on startup with `create_all`, and upgrades to existing databases (new columns,
+  float → decimal conversion, indexes, the non-negative stock check) are idempotent steps in `app/migrations.py`. This keeps
+  setup to one command. A team with several environments should switch to Alembic.
 - **Docker runs the dev servers** (Uvicorn `--reload`, Vite dev). For production build the frontend
   (`npm run build`) and serve the static files behind a reverse proxy.
 - **Tax model:** intra-state GST (CGST + SGST) is displayed. Inter-state IGST, e-invoicing and GST returns are not implemented.
 - **Costing:** weighted-average only (no FIFO / lot costing). Returns, credit notes, lot/serial numbers and expiry dates are not modelled.
 - **Digest scheduler** runs inside the API process (checked every 15 minutes). It claims the day in the database first, so a restart
   or a second worker cannot send it twice, but a fleet of workers would be better served by a dedicated job runner.
-- **Roles:** all users have the same permissions. Inventory-manager vs warehouse-staff roles are not modelled.
+- **Roles** are coarse (three fixed roles). There are no per-warehouse permissions and no approval workflows.
 - **Pick and pack** is a two-step confirmation on Ready deliveries. There are no pick lists, wave picking or packages.
-- **Pagination** is done in the browser, which is fine for thousands of rows but not millions.
+- **Search** uses `ILIKE`. That is fast at tens of thousands of rows; beyond that add trigram indexes (`pg_trgm`).
+- **CSV export/import** run in one request (import is capped at 2,000 rows), which is fine for spreadsheets, not for bulk loads.
 - **Tests:** the backend has an API-level pytest suite (workflow, backorders, taxes, warehouses, reorder, archive/delete, contacts,
-  valuation, digest, CSV, auth).
+  valuation, digest, CSV, auth, pagination, roles, audit, locking and concurrency, exact money, rate limits, migrations).
   The React UI has no automated tests; it was checked by hand in the browser, including phone width and print view.
-- **Security notes:** JWTs live in `localStorage`; there is no rate limiting on login or OTP endpoints beyond the
-  5-attempt OTP cap. Add both before going to production.
+- **Security notes:** JWTs live in `localStorage` (an HttpOnly cookie is safer against XSS). The activity log is written by the
+  application, so someone with direct database access could alter it; ship it to an append-only store for strict compliance.
 
 ---
 

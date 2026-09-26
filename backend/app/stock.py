@@ -64,6 +64,27 @@ def free_to_use(db: Session, product_id: int, location_id: int, exclude_op: int 
     return on_hand(db, product_id, location_id) - reserved(db, product_id, location_id, exclude_op)
 
 
+def touch(obj) -> None:
+    """Bump the optimistic-locking version: anyone still holding the old version will be told it changed."""
+    obj.version = (obj.version or 1) + 1
+
+
+def lock_source_stock(db: Session, op: Operation) -> None:
+    """Serialise anyone who is about to use the same stock. Rows are locked in id order (no deadlocks); once we hold the
+    lock every later query sees the other transaction's committed result, so the availability check that follows is
+    made against the truth. Without this, two people validating at the same instant could both pass the check."""
+    if op.type not in ("OUT", "INT") or op.source_location.type != "internal":
+        return
+    ids = {ln.product_id for ln in op.lines}
+    if ids:
+        db.execute(
+            select(StockQuant.id)
+            .where(StockQuant.location_id == op.source_location_id, StockQuant.product_id.in_(ids))
+            .order_by(StockQuant.id)
+            .with_for_update()
+        )
+
+
 def add_qty(db: Session, product_id: int, location: Location, delta: float) -> None:
     if location.type != "internal":
         return
@@ -107,6 +128,8 @@ def apply_costing(db: Session, pairs: list[tuple[Product, OperationLine]], src: 
     coming_in = dst.type == "internal" and src.type != "internal"
     for product, ln in pairs:
         if coming_in:
+            db.execute(select(Product.id).where(Product.id == product.id).with_for_update())
+            db.refresh(product)
             incoming = ln.unit_price if ln.unit_price is not None else (product.cost_price or product.unit_cost)
             before = max(total_on_hand(db, product.id), 0.0)
             total = before + ln.quantity
@@ -128,6 +151,8 @@ def action_todo(db: Session, op: Operation) -> str | None:
     if not op.lines:
         raise WorkflowError("Add at least one product first")
     op.picked_at = op.packed_at = None
+    lock_source_stock(db, op)
+    touch(op)
     if line_shortages(db, op):
         op.status = "waiting"
         return "Some products are not in stock - moved to Waiting"
@@ -139,9 +164,11 @@ def action_check(db: Session, op: Operation) -> str | None:
     """Waiting -> Ready once stock is available."""
     if op.status != "waiting":
         raise WorkflowError("Only waiting records can be re-checked")
+    lock_source_stock(db, op)
     if line_shortages(db, op):
         return "Still waiting for stock"
     op.status = "ready"
+    touch(op)
     return None
 
 
@@ -165,9 +192,11 @@ def action_validate(
     if not any(q > EPS for q in qty.values()):
         raise WorkflowError("Enter a quantity for at least one product")
 
+    lock_source_stock(db, op)
     if line_shortages(db, op, qty):
         op.status = "waiting"
         op.picked_at = op.packed_at = None
+        touch(op)
         return "Not enough stock - moved back to Waiting"
     if op.type == "OUT" and not op.packed_at:
         raise WorkflowError("Pick and pack the items before validating the delivery")
@@ -192,6 +221,7 @@ def action_validate(
         add_qty(db, ln.product_id, op.dest_location, ln.quantity)
     op.status = "done"
     op.done_at = utcnow()
+    touch(op)
 
     message = None
     if partial and backorder:
@@ -221,6 +251,7 @@ def action_pick(db: Session, op: Operation) -> None:
     if op.picked_at:
         raise WorkflowError("Items are already picked")
     op.picked_at = utcnow()
+    touch(op)
 
 
 def action_pack(db: Session, op: Operation) -> None:
@@ -233,12 +264,14 @@ def action_pack(db: Session, op: Operation) -> None:
     if op.packed_at:
         raise WorkflowError("Items are already packed")
     op.packed_at = utcnow()
+    touch(op)
 
 
 def action_cancel(db: Session, op: Operation) -> None:
     if op.status in ("done", "cancelled"):
         raise WorkflowError("This record can no longer be cancelled")
     op.status = "cancelled"
+    touch(op)
 
 
 def promote_waiting(db: Session) -> None:
@@ -248,6 +281,7 @@ def promote_waiting(db: Session) -> None:
         if not line_shortages(db, op):
             op.status = "ready"
             op.picked_at = op.packed_at = None
+            touch(op)
             db.flush()
 
 

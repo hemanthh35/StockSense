@@ -216,3 +216,17 @@ export function ExportButton({ path, params, filename, onError, label = 'Export 
   }
   return <button className="btn" disabled={busy} onClick={go}><Icon name="download" size={16} />{busy ? 'Preparing…' : label}</button>
 }
+
+export const fmtDateTime = (iso) =>
+  iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'
+
+/** "just now", "5 min ago", "3 h ago", "2 d ago", then a date. */
+export function ago(iso) {
+  if (!iso) return '—'
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (s < 45) return 'just now'
+  if (s < 3600) return `${Math.round(s / 60)} min ago`
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`
+  if (s < 7 * 86400) return `${Math.round(s / 86400)} d ago`
+  return fmtDateTime(iso)
+}

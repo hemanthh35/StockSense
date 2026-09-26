@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useApi } from '../hooks'
 import { Icon } from '../components/icons.jsx'
+import { atLeast } from '../perm.js'
 import { Empty, PageHeader, STATUS_LABEL, Toast, fmtDate, money, num, useToast } from '../components/ui.jsx'
 
 const CARD = {
@@ -58,7 +59,8 @@ const KPIS = [
   ['internal_transfers_scheduled', 'Transfers scheduled'],
 ]
 
-export default function Dashboard() {
+export default function Dashboard({ user }) {
+  const canReorder = atLeast(user, 'manager')
   const [f, setF] = useState(load)
   useEffect(() => { try { sessionStorage.setItem(KEY, JSON.stringify(f)) } catch { /* private mode */ } }, [f])
   const { data } = useApi('/dashboard', f)
@@ -140,7 +142,7 @@ export default function Dashboard() {
             <div className="card">
               <div className="card-head">
                 <h3>Low stock alerts</h3>
-                {data.reorder_count > 0
+                {data.reorder_count > 0 && canReorder
                   ? <button className="btn primary sm" onClick={() => reorder(null)}><Icon name="receive" size={14} />Reorder {data.reorder_count} item{data.reorder_count > 1 ? 's' : ''}</button>
                   : <Link to="/stock" className="link small">View stock</Link>}
               </div>
@@ -161,7 +163,7 @@ export default function Dashboard() {
                             <td className="num muted">{i.incoming ? `+${num(i.incoming)}` : '—'}</td>
                             <td>
                               {i.suggested_qty > 0
-                                ? <span className="inline" style={{ alignItems: 'center' }}><span className="suggest">Order {num(i.suggested_qty)}</span><button className="btn sm" onClick={() => reorder([i.product_id])}>Create receipt</button></span>
+                                ? <span className="inline" style={{ alignItems: 'center' }}><span className="suggest">Order {num(i.suggested_qty)}</span>{canReorder && <button className="btn sm" onClick={() => reorder([i.product_id])}>Create receipt</button>}</span>
                                 : <span className="suggest ok">{i.incoming ? 'Covered by incoming' : 'No rule set'}</span>}
                             </td>
                           </tr>

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useApi, useDebounced } from '../hooks'
+import { useApi, useDebounced, usePaged } from '../hooks'
 import { Empty, ExportButton, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
 const Tile = ({ label, value, tone, hint }) => (
@@ -20,9 +20,9 @@ export default function StockReports({ view, tabs }) {
   const whs = useApi('/warehouses').data || []
   const [toast, notify, close] = useToast()
   const params = isValuation ? { q: dq, warehouse_id: wh } : { days, warehouse_id: wh }
-  const { data } = useApi(isValuation ? '/reports/valuation' : '/reports/margin', params, [view])
-  const rows = data?.rows || []
-  const pager = usePager(rows)
+  const pager = usePaged(isValuation ? '/reports/valuation' : '/reports/margin', params, { size: 10, deps: [view] })
+  const data = pager.data
+  const rows = pager.rows
   const t = data?.totals
   const maxCat = Math.max(...(data?.by_category || []).map((c) => c.value), 1)
 
@@ -83,8 +83,8 @@ export default function StockReports({ view, tabs }) {
             <table>
               <thead><tr><th>Product</th><th>Category</th><th className="num">On hand</th><th className="num">Avg cost</th><th className="num">Stock value</th><th className="num">Sales price</th><th className="num">At sales price</th></tr></thead>
               <tbody>
-                {!data && <TableSkeleton cols={7} />}
-                {pager.slice.map((r) => (
+                {pager.loading && !rows.length && <TableSkeleton cols={7} />}
+                {rows.map((r) => (
                   <tr key={r.product_id}>
                     <td className="strong">{r.name}<span className="sub mono">{r.sku}</span></td>
                     <td>{r.category ? <span className="tag">{r.category}</span> : <span className="dim">—</span>}</td>
@@ -101,8 +101,8 @@ export default function StockReports({ view, tabs }) {
             <table>
               <thead><tr><th>Product</th><th className="num">Quantity</th><th className="num">Revenue</th><th className="num">Cost</th><th className="num">Margin</th><th className="num">Margin %</th></tr></thead>
               <tbody>
-                {!data && <TableSkeleton cols={6} />}
-                {pager.slice.map((r) => (
+                {pager.loading && !rows.length && <TableSkeleton cols={6} />}
+                {rows.map((r) => (
                   <tr key={r.product_id}>
                     <td className="strong">{r.name}<span className="sub mono">{r.sku}</span></td>
                     <td className="num">{num(r.quantity)}</td>
@@ -116,7 +116,7 @@ export default function StockReports({ view, tabs }) {
             </table>
           )}
         </div>
-        {data && !rows.length && (
+        {!pager.loading && !rows.length && (
           <Empty icon="box" title={isValuation ? 'No stock to value' : 'No completed deliveries'} hint={isValuation ? 'Receive stock and it shows up here.' : `Validate a delivery and its margin appears here.`} />
         )}
         <Pager p={pager} />

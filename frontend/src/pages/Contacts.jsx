@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useApi, useDebounced } from '../hooks'
+import { useDebounced, usePaged } from '../hooks'
+import { atLeast } from '../perm.js'
 import { Icon } from '../components/icons.jsx'
 import { ArchivedTag } from '../components/Lifecycle.jsx'
 import PartyModal from '../components/PartyModal.jsx'
@@ -7,16 +8,17 @@ import { Empty, ExportButton, PageHeader, Pager, SearchInput, TableSkeleton, Toa
 
 const KIND_LABEL = { vendor: 'Supplier', customer: 'Customer', both: 'Supplier & customer' }
 
-export default function Contacts() {
+export default function Contacts({ user }) {
+  const canManage = atLeast(user, 'manager')
   const [q, setQ] = useState('')
   const [kind, setKind] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const dq = useDebounced(q)
-  const { data, reload } = useApi('/parties', { q: dq, kind, include_archived: showArchived ? 'true' : '' })
+  const paged = usePaged('/parties', { q: dq, kind, include_archived: showArchived ? 'true' : '' }, { size: 25 })
+  const { reload } = paged
   const [editing, setEditing] = useState(null) // party object, or {} for a new one
   const [toast, notify, close] = useToast()
-  const rows = data || []
-  const pager = usePager(rows)
+  const rows = paged.rows
 
   return (
     <>
@@ -25,7 +27,7 @@ export default function Contacts() {
         subtitle="Your suppliers and customers, with GSTIN, address and document history."
         actions={<>
           <ExportButton path="/export/parties.csv" params={{ kind, include_archived: showArchived ? 'true' : '' }} filename="contacts.csv" onError={(m) => notify(m, 'error')} />
-          <button className="btn primary" onClick={() => setEditing({})}><Icon name="plus" size={16} />New contact</button>
+          {canManage && <button className="btn primary" onClick={() => setEditing({})}><Icon name="plus" size={16} />New contact</button>}
         </>}
       />
       <div className="card">
@@ -43,8 +45,8 @@ export default function Contacts() {
           <table className="rows">
             <thead><tr><th>Name</th><th>Type</th><th>GSTIN</th><th className="num">Documents</th><th className="num">Total value</th><th>Last document</th></tr></thead>
             <tbody>
-              {!data && <TableSkeleton cols={6} />}
-              {pager.slice.map((p) => (
+              {paged.loading && !rows.length && <TableSkeleton cols={6} />}
+              {rows.map((p) => (
                 <tr key={p.id} onClick={() => setEditing(p)} style={p.active ? undefined : { opacity: 0.6 }}>
                   <td className="strong">{p.name} {!p.active && <ArchivedTag />}<span className="sub">{[p.email, p.phone].filter(Boolean).join(' · ') || '—'}</span></td>
                   <td><span className="tag">{KIND_LABEL[p.kind]}</span></td>
@@ -57,15 +59,16 @@ export default function Contacts() {
             </tbody>
           </table>
         </div>
-        {data && !rows.length && (
+        {!paged.loading && !rows.length && (
           <Empty icon="user" title={q || kind ? 'No matches' : 'No contacts yet'} hint={q || kind ? 'Try a different search.' : 'Add your suppliers and customers so documents can pick them from a list.'} />
         )}
-        <Pager p={pager} />
+        <Pager p={paged} />
       </div>
 
       {editing && (
         <PartyModal
           party={editing.id ? editing : null}
+          readOnly={!canManage}
           onClose={() => setEditing(null)}
           onSaved={(saved) => { setEditing(null); reload(); if (saved) notify('Contact saved', 'ok') }}
           notify={notify}

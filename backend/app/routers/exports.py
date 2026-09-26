@@ -6,16 +6,16 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from .. import stock
+from .. import audit, stock
 from ..db import get_db
-from ..deps import current_user
+from ..deps import current_user, manager
 from ..models import Category, Location, Party, Product, Tax, User
-from .inventory import stock_list
-from .operations import list_operations, move_history
+from .inventory import stock_rows
+from .operations import moves_page, operations_page
 from .parties import party_out, _stats as party_stats
-from .products import product_out
+from .products import products_out
 from .reports import margin_rows, valuation_rows
 
 router = APIRouter(tags=["csv"])
@@ -47,12 +47,12 @@ def _csv(filename: str, header: list[str], rows: list[list]) -> Response:
 # ------------------------------------------------------------------ exports
 @router.get("/export/products.csv")
 def export_products(include_archived: bool = False, db: Session = Depends(get_db), _: User = Depends(current_user)):
-    stmt = select(Product).order_by(Product.name)
+    stmt = select(Product).options(joinedload(Product.category), joinedload(Product.tax)).order_by(Product.name)
     if not include_archived:
         stmt = stmt.where(Product.active.is_(True))
     rows = []
-    for p in db.scalars(stmt):
-        o = product_out(db, p)
+    products = list(db.scalars(stmt))
+    for p, o in zip(products, products_out(db, products)):  # one stock query for the lot
         rows.append([p.sku, p.name, o["category"], p.uom, p.unit_cost, p.cost_price, p.avg_cost, p.hsn_code, o["tax"]["name"] if o["tax"] else "None",
                      p.reorder_min, p.reorder_qty, o["on_hand"], "yes" if p.active else "archived"])
     return _csv("products.csv", ["sku", "name", "category", "uom", "unit_cost", "cost_price", "avg_cost", "hsn_code", "tax", "reorder_min", "reorder_qty", "on_hand", "status"], rows)
@@ -62,7 +62,7 @@ def export_products(include_archived: bool = False, db: Session = Depends(get_db
 def export_stock(q: str | None = None, warehouse_id: int | None = None, category_id: int | None = None,
                  db: Session = Depends(get_db), user: User = Depends(current_user)):
     rows = []
-    for r in stock_list(q=q, warehouse_id=warehouse_id, category_id=category_id, db=db, _=user):
+    for r in stock_rows(db, q=q, warehouse_id=warehouse_id, category_id=category_id):
         locs = r["locations"] or [{"location": "", "on_hand": 0, "free_to_use": 0}]
         for l in locs:
             rows.append([r["sku"], r["name"], r["category"], l["location"], l["on_hand"], l["free_to_use"], r["unit_cost"], round(l["on_hand"] * r["unit_cost"], 2)])
@@ -73,8 +73,8 @@ def export_stock(q: str | None = None, warehouse_id: int | None = None, category
 def export_moves(q: str | None = None, status: str | None = None, direction: str | None = None, type: str | None = None,
                  warehouse_id: int | None = None, location_id: int | None = None, category_id: int | None = None,
                  db: Session = Depends(get_db), user: User = Depends(current_user)):
-    moves = move_history(q=q, status=status, direction=direction, type=type, warehouse_id=warehouse_id,
-                         location_id=location_id, category_id=category_id, db=db, _=user)
+    moves = moves_page(db, q=q, status=status, direction=direction, type=type, warehouse_id=warehouse_id,
+                       location_id=location_id, category_id=category_id)
     rows = [[m["reference"], m["type"], m["contact"], m["product"], m["from"], m["to"], m["quantity"], m["direction"], m["date"], m["status"]] for m in moves]
     return _csv("move-history.csv", ["reference", "type", "contact", "product", "from", "to", "quantity", "direction", "date", "status"], rows)
 
@@ -83,8 +83,8 @@ def export_moves(q: str | None = None, status: str | None = None, direction: str
 def export_operations(type: str | None = None, status: str | None = None, q: str | None = None, warehouse_id: int | None = None,
                       location_id: int | None = None, category_id: int | None = None,
                       db: Session = Depends(get_db), user: User = Depends(current_user)):
-    ops = list_operations(type=type, status=status, q=q, warehouse_id=warehouse_id, location_id=location_id,
-                          category_id=category_id, db=db, _=user)
+    ops = operations_page(db, type=type, status=status, q=q, warehouse_id=warehouse_id, location_id=location_id,
+                          category_id=category_id)
     rows = [[o["reference"], o["type_label"], o["status"], o["contact"], o["schedule_date"], o["warehouse"]["short_code"],
              o["source_location"]["name"], o["dest_location"]["name"], o["subtotal"], o["tax_total"], o["total"], o["responsible"]] for o in ops]
     return _csv("operations.csv", ["reference", "type", "status", "contact", "schedule_date", "warehouse", "from", "to", "subtotal", "tax", "total", "responsible"], rows)
@@ -158,6 +158,8 @@ def _number(raw: str, field: str) -> float:
         raise ValueError(f"{field} must be a number")
     if v < 0:
         raise ValueError(f"{field} can't be negative")
+    if v > 1_000_000_000:
+        raise ValueError(f"{field} is too large")
     return v
 
 
@@ -181,7 +183,7 @@ def _match_tax(raw: str, taxes: list[Tax]):
 
 
 @router.post("/products/import")
-def import_products(body: ImportIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def import_products(body: ImportIn, db: Session = Depends(get_db), user: User = Depends(manager)):
     text = body.csv.lstrip("﻿")
     if len(text) > MAX_CHARS:
         raise HTTPException(413, "File is too large (2 MB max)")
@@ -208,6 +210,8 @@ def import_products(body: ImportIn, db: Session = Depends(get_db), user: User = 
         try:
             if not sku or not name:
                 raise ValueError("name and sku are required")
+            if len(name) > 150 or len(sku) > 50:
+                raise ValueError("name (150) or sku (50) is too long")
             if sku in seen:
                 raise ValueError("duplicate SKU in this file")
             seen.add(sku)
@@ -262,6 +266,7 @@ def import_products(body: ImportIn, db: Session = Depends(get_db), user: User = 
                 db.flush()
                 if nums.get("initial_stock"):
                     stock.adjust(db, p, loc, nums["initial_stock"], user.id)
+        audit.record(db, user, "import", "product", None, "CSV import", detail=f"{created} created, {updated} updated, {len(errors)} skipped")
         db.commit()
 
     return {

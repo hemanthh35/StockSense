@@ -2,18 +2,21 @@
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import distinct, func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import lifecycle
+from .. import audit, lifecycle
+from ..conflict import bump, check_version
 from ..db import get_db
-from ..deps import current_user
+from ..deps import current_user, manager
 from ..models import Operation, OperationLine, Party, User
+from ..pagination import PageParams, count_rows, envelope, slice_stmt
 
 router = APIRouter(tags=["parties"], dependencies=[Depends(current_user)])
 
 KINDS = ("vendor", "customer", "both")
+TRACKED = ["name", "kind", "gstin", "email", "phone", "address"]
 
 # GST state / UT codes (the first two digits of a GSTIN)
 STATES = {
@@ -54,12 +57,13 @@ def validate_gstin(raw: str | None) -> str | None:
 
 
 class PartyIn(BaseModel):
-    name: str
-    kind: str = "both"
-    gstin: str | None = None
+    name: str = Field(max_length=150)
+    kind: str = Field(default="both", max_length=10)
+    gstin: str | None = Field(default=None, max_length=32)
     email: EmailStr | None = None
-    phone: str | None = None
-    address: str | None = None
+    phone: str | None = Field(default=None, max_length=30)
+    address: str | None = Field(default=None, max_length=300)
+    version: int | None = None  # the version the editor loaded, for optimistic locking
 
     @field_validator("email", "gstin", "phone", "address", mode="before")
     @classmethod
@@ -79,6 +83,7 @@ def party_out(p: Party, stats: dict | None = None) -> dict:
         "phone": p.phone,
         "address": p.address,
         "active": p.active,
+        "version": p.version,
         "documents": s.get("documents", 0),
         "total_value": round(s.get("total", 0), 2),
         "last_document": s.get("last").isoformat() if s.get("last") else None,
@@ -91,7 +96,7 @@ def brief(p: Party) -> dict:
             "phone": p.phone, "state": STATES.get(p.gstin[:2]) if p.gstin else None}
 
 
-def _stats(db: Session) -> dict[int, dict]:
+def _stats(db: Session, ids: list[int] | None = None) -> dict[int, dict]:
     stmt = (
         select(
             Operation.party_id,
@@ -103,6 +108,10 @@ def _stats(db: Session) -> dict[int, dict]:
         .where(Operation.party_id.isnot(None), Operation.status != "cancelled")
         .group_by(Operation.party_id)
     )
+    if ids is not None:
+        if not ids:
+            return {}
+        stmt = stmt.where(Operation.party_id.in_(ids))
     return {pid: {"documents": n, "total": float(t), "last": d} for pid, n, t, d in db.execute(stmt).all()}
 
 
@@ -117,27 +126,39 @@ def _clean(body: PartyIn) -> tuple[str, str]:
 
 @router.get("/parties")
 def list_parties(
-    q: str | None = None, kind: str | None = None, include_archived: bool = False, db: Session = Depends(get_db)
+    q: str | None = None,
+    kind: str | None = None,
+    include_archived: bool = False,
+    page: PageParams = Depends(),
+    db: Session = Depends(get_db),
 ):
-    stmt = select(Party).order_by(Party.name)
+    base = select(Party)
     if not include_archived:
-        stmt = stmt.where(Party.active.is_(True))
+        base = base.where(Party.active.is_(True))
     if kind in ("vendor", "customer"):
-        stmt = stmt.where(Party.kind.in_([kind, "both"]))
+        base = base.where(Party.kind.in_([kind, "both"]))
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(or_(Party.name.ilike(like), Party.gstin.ilike(like), Party.email.ilike(like)))
-    stats = _stats(db)
-    return [party_out(p, stats.get(p.id)) for p in db.scalars(stmt)]
+        base = base.where(or_(Party.name.ilike(like), Party.gstin.ilike(like), Party.email.ilike(like)))
+    stmt = base.order_by(Party.name)
+    if not page.enabled:
+        rows = list(db.scalars(stmt))
+        stats = _stats(db)
+        return [party_out(p, stats.get(p.id)) for p in rows]
+    rows = list(db.scalars(slice_stmt(stmt, page)))
+    stats = _stats(db, [p.id for p in rows])  # history for just the 25 on screen, not the whole book
+    return envelope([party_out(p, stats.get(p.id)) for p in rows], count_rows(db, base), page)
 
 
 @router.post("/parties", status_code=201)
-def create_party(body: PartyIn, db: Session = Depends(get_db)):
+def create_party(body: PartyIn, db: Session = Depends(get_db), actor: User = Depends(manager)):
     name, kind = _clean(body)
     if db.scalar(select(Party).where(func.lower(Party.name) == name.lower())):
         raise HTTPException(409, "A contact with this name already exists")
     p = Party(name=name, kind=kind, gstin=validate_gstin(body.gstin), email=body.email, phone=body.phone, address=body.address)
     db.add(p)
+    db.flush()
+    audit.record(db, actor, "create", "contact", p.id, p.name)
     db.commit()
     return party_out(p)
 
@@ -150,54 +171,64 @@ def get_party(pid: int, db: Session = Depends(get_db)):
     ops = db.scalars(select(Operation).where(Operation.party_id == pid).order_by(Operation.id.desc()).limit(10)).all()
     from .operations import op_out  # local import: operations imports this module
 
-    out = party_out(p, _stats(db).get(pid))
+    out = party_out(p, _stats(db, [pid]).get(pid))
     out["recent"] = [op_out(db, o, with_lines=False) for o in ops]
     return out
 
 
 @router.put("/parties/{pid}")
-def update_party(pid: int, body: PartyIn, db: Session = Depends(get_db)):
+def update_party(pid: int, body: PartyIn, db: Session = Depends(get_db), actor: User = Depends(manager)):
     p = db.get(Party, pid)
     if not p:
         raise HTTPException(404, "Contact not found")
+    check_version(p, body.version)
     name, kind = _clean(body)
     if db.scalar(select(Party).where(func.lower(Party.name) == name.lower(), Party.id != pid)):
         raise HTTPException(409, "A contact with this name already exists")
+    old = audit.snapshot(p, TRACKED)
     p.name, p.kind, p.gstin = name, kind, validate_gstin(body.gstin)
     p.email, p.phone, p.address = body.email, body.phone, body.address
+    if changes := audit.diff(old, audit.snapshot(p, TRACKED)):
+        bump(p)
+        audit.record(db, actor, "update", "contact", p.id, p.name, changes=changes)
     db.commit()
-    return party_out(p, _stats(db).get(pid))
+    return party_out(p, _stats(db, [pid]).get(pid))
 
 
 @router.post("/parties/{pid}/archive")
-def archive_party(pid: int, db: Session = Depends(get_db)):
+def archive_party(pid: int, db: Session = Depends(get_db), actor: User = Depends(manager)):
     p = db.get(Party, pid)
     if not p:
         raise HTTPException(404, "Contact not found")
     if reason := lifecycle.archive_blocker(lifecycle.party_usage(db, pid), "This contact"):
         raise HTTPException(409, reason)
     p.active = False
+    bump(p)
+    audit.record(db, actor, "archive", "contact", p.id, p.name)
     db.commit()
     return party_out(p)
 
 
 @router.post("/parties/{pid}/restore")
-def restore_party(pid: int, db: Session = Depends(get_db)):
+def restore_party(pid: int, db: Session = Depends(get_db), actor: User = Depends(manager)):
     p = db.get(Party, pid)
     if not p:
         raise HTTPException(404, "Contact not found")
     p.active = True
+    bump(p)
+    audit.record(db, actor, "restore", "contact", p.id, p.name)
     db.commit()
     return party_out(p)
 
 
 @router.delete("/parties/{pid}")
-def delete_party(pid: int, db: Session = Depends(get_db)):
+def delete_party(pid: int, db: Session = Depends(get_db), actor: User = Depends(manager)):
     p = db.get(Party, pid)
     if not p:
         raise HTTPException(404, "Contact not found")
     if reason := lifecycle.delete_blocker(lifecycle.party_usage(db, pid), "This contact"):
         raise HTTPException(409, reason)
+    audit.record(db, actor, "delete", "contact", pid, p.name)
     db.delete(p)
     db.commit()
     return {"ok": True}

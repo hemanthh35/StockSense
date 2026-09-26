@@ -10,7 +10,7 @@ const PATH = { IN: 'receipts', OUT: 'deliveries', INT: 'transfers', ADJ: 'adjust
 const GSTIN_SHAPE = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
 
 /** Create or edit a supplier/customer. When editing it also lists the party's latest documents. */
-export default function PartyModal({ party, defaults = {}, onClose, onSaved, notify }) {
+export default function PartyModal({ party, defaults = {}, onClose, onSaved, notify, readOnly = false }) {
   const editing = !!party?.id
   const [form, setForm] = useState({ name: '', kind: 'both', gstin: '', email: '', phone: '', address: '', ...defaults, ...(party || {}) })
   const [full, setFull] = useState(null)
@@ -29,7 +29,7 @@ export default function PartyModal({ party, defaults = {}, onClose, onSaved, not
     e.preventDefault()
     setBusy(true); setError('')
     try {
-      const body = { name: form.name, kind: form.kind, gstin: gstin || null, email: form.email || null, phone: form.phone || null, address: form.address || null }
+      const body = { name: form.name, kind: form.kind, gstin: gstin || null, email: form.email || null, phone: form.phone || null, address: form.address || null, version: editing ? party.version : undefined }
       const saved = editing ? await api(`/parties/${party.id}`, { method: 'PUT', body }) : await api('/parties', { method: 'POST', body })
       onSaved(saved)
     } catch (x) { setError(x.message) }
@@ -43,12 +43,13 @@ export default function PartyModal({ party, defaults = {}, onClose, onSaved, not
       subtitle={editing ? undefined : 'Saved contacts fill in the name, address and GSTIN on documents.'}
       onClose={onClose}
       footer={<>
-        {editing && <LifecycleActions item={{ ...party, ...(full || {}) }} base="/parties" name="Contact" notify={notify} onDone={onSaved.bind(null, null)} />}
-        <button className="btn" onClick={onClose}>Discard</button>
-        <button className="btn primary" form="party-form" disabled={busy}>Save contact</button>
+        {editing && !readOnly && <LifecycleActions item={{ ...party, ...(full || {}) }} base="/parties" name="Contact" notify={notify} onDone={onSaved.bind(null, null)} />}
+        <button className="btn" onClick={onClose}>{readOnly ? 'Close' : 'Discard'}</button>
+        {!readOnly && <button className="btn primary" form="party-form" disabled={busy}>Save contact</button>}
       </>}
     >
       <form id="party-form" className="form-grid" onSubmit={save}>
+        <fieldset disabled={readOnly} className="bare" style={{ display: 'contents' }}>
         <Field label="Name" className="full"><input value={form.name} onChange={set('name')} required autoFocus /></Field>
         <Field label="Type" className="full"><Segmented value={form.kind} onChange={(kind) => setForm({ ...form, kind })} options={KIND_OPTS} /></Field>
         <Field
@@ -60,6 +61,7 @@ export default function PartyModal({ party, defaults = {}, onClose, onSaved, not
         <Field label="Phone"><input value={form.phone || ''} onChange={set('phone')} inputMode="tel" /></Field>
         <Field label="Email" className="full"><input type="email" value={form.email || ''} onChange={set('email')} /></Field>
         <Field label="Address" className="full"><input value={form.address || ''} onChange={set('address')} /></Field>
+        </fieldset>
         {error && <div className="form-error full"><Icon name="alert" size={16} />{error}</div>}
       </form>
 

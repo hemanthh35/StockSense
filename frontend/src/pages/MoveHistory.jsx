@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useApi, useDebounced } from '../hooks'
+import { useApi, useDebounced, usePaged } from '../hooks'
 import { Icon } from '../components/icons.jsx'
 import { Empty, ExportButton, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, num, usePager } from '../components/ui.jsx'
 
@@ -16,10 +16,10 @@ export default function MoveHistory() {
   const whs = useApi('/warehouses').data || []
   const [view, setView] = useState('list')
   const dq = useDebounced(q)
-  const { data } = useApi('/moves', { q: dq, status, direction, warehouse_id: wh })
+  const pager = usePaged('/moves', { q: dq, status, direction, warehouse_id: wh }, { size: 25, enabled: view === 'list' })
   const nav = useNavigate()
-  const rows = data || []
-  const pager = usePager(rows)
+  const rows = pager.rows
+  const kanban = usePaged('/moves', { q: dq, status, direction, warehouse_id: wh }, { size: 100, enabled: view === 'kanban' })
   const open = (r) => nav(`/operations/${KIND_PATH[r.type]}/${r.operation_id}`)
 
   return (
@@ -58,8 +58,8 @@ export default function MoveHistory() {
               <table className="rows">
                 <thead><tr><th>Reference</th><th>Contact</th><th>Product</th><th>Route</th><th className="num">Quantity</th><th>Date</th><th>Status</th></tr></thead>
                 <tbody>
-                  {!data && <TableSkeleton cols={7} />}
-                  {pager.slice.map((r, i) => (
+                  {pager.loading && !rows.length && <TableSkeleton cols={7} />}
+                  {rows.map((r, i) => (
                     <tr key={i} className={`move ${r.direction}`} onClick={() => open(r)}>
                       <td className="mono strong">{r.reference}</td>
                       <td>{r.contact || <span className="dim">—</span>}</td>
@@ -73,13 +73,13 @@ export default function MoveHistory() {
                 </tbody>
               </table>
             </div>
-            {data && !rows.length && <Empty icon="swap" title="No moves found" hint="Moves appear once a receipt, delivery or transfer is ready or done." />}
+            {!pager.loading && !rows.length && <Empty icon="swap" title="No moves found" hint="Moves appear once a receipt, delivery or transfer is ready or done." />}
             <Pager p={pager} />
           </>
         ) : (
           <div className="kanban">
             {['waiting', 'ready', 'done'].map((s) => {
-              const col = rows.filter((r) => r.status === s)
+              const col = kanban.rows.filter((r) => r.status === s)
               return (
                 <div key={s} className="col">
                   <div className="col-head"><Status value={s} /><span className="count">{col.length}</span></div>
@@ -90,7 +90,7 @@ export default function MoveHistory() {
                       <div className="meta"><span className="mono">{r.from} → {r.to}</span><span className={`dir ${r.direction}`}>{sign(r.direction)}{num(r.quantity)}</span></div>
                     </button>
                   ))}
-                  {col.length > 20 && <div className="col-empty">+{col.length - 20} more — use list view</div>}
+                  {kanban.total > kanban.rows.length && s === 'done' && <div className="col-empty">Showing the latest {kanban.rows.length} of {kanban.total} — use the list view for the rest</div>}
                   {!col.length && <div className="col-empty">Nothing here</div>}
                 </div>
               )

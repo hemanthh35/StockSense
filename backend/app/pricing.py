@@ -1,8 +1,18 @@
-"""Tax resolution and document totals. Rates are copied onto each line so old documents never change."""
+"""Tax resolution and document totals. Rates are copied onto each line so old documents never change.
+All money arithmetic is done in Decimal and rounded half-up to whole paise, so totals never drift."""
+from decimal import ROUND_HALF_UP, Decimal
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import Category, Operation, OperationLine, Product, Tax
+
+PAISE = Decimal("0.01")
+HUNDRED = Decimal(100)
+
+
+def _d(x) -> Decimal:
+    return Decimal(str(x if x is not None else 0))
 
 
 def default_tax(db: Session) -> Tax | None:
@@ -30,25 +40,33 @@ def fill_line(line: OperationLine, product: Product, unit_price: float | None = 
     line.tax_name = tax.name if tax else None
 
 
+def _line(ln: OperationLine) -> tuple[Decimal, Decimal]:
+    sub = (_d(ln.quantity) * _d(ln.unit_price)).quantize(PAISE, ROUND_HALF_UP)
+    tax = (sub * _d(ln.tax_rate) / HUNDRED).quantize(PAISE, ROUND_HALF_UP)
+    return sub, tax
+
+
 def line_amounts(ln: OperationLine) -> tuple[float, float]:
-    sub = round((ln.quantity or 0) * (ln.unit_price or 0), 2)
-    return sub, round(sub * (ln.tax_rate or 0) / 100, 2)
+    sub, tax = _line(ln)
+    return float(sub), float(tax)
 
 
 def op_totals(op: Operation) -> dict:
-    subtotal = tax_total = 0.0
-    groups: dict[tuple[str, float], dict] = {}
+    subtotal = tax_total = Decimal(0)
+    groups: dict[tuple[str, Decimal], dict] = {}
     for ln in op.lines:
-        sub, tax = line_amounts(ln)
+        sub, tax = _line(ln)
         subtotal += sub
         tax_total += tax
         if ln.tax_name:
-            g = groups.setdefault((ln.tax_name, ln.tax_rate), {"name": ln.tax_name, "rate": ln.tax_rate, "base": 0.0, "amount": 0.0})
-            g["base"] = round(g["base"] + sub, 2)
-            g["amount"] = round(g["amount"] + tax, 2)
+            g = groups.setdefault((ln.tax_name, _d(ln.tax_rate)), {"name": ln.tax_name, "rate": float(ln.tax_rate or 0), "base": Decimal(0), "amount": Decimal(0)})
+            g["base"] += sub
+            g["amount"] += tax
     return {
-        "subtotal": round(subtotal, 2),
-        "tax_total": round(tax_total, 2),
-        "total": round(subtotal + tax_total, 2),
-        "tax_breakdown": sorted(groups.values(), key=lambda g: g["rate"]),
+        "subtotal": float(subtotal),
+        "tax_total": float(tax_total),
+        "total": float(subtotal + tax_total),
+        "tax_breakdown": [
+            {**g, "base": float(g["base"]), "amount": float(g["amount"])} for g in sorted(groups.values(), key=lambda g: g["rate"])
+        ],
     }

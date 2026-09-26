@@ -1,5 +1,6 @@
 """Test setup. Runs against its own database (stocksense_test) so real data is never touched."""
 import os
+import uuid
 
 import psycopg
 import pytest
@@ -20,6 +21,7 @@ def _prepare_database() -> None:
 os.environ["DIGEST_ENABLED"] = "false"  # no background e-mail loop while testing
 os.environ["BREVO_API_KEY"] = ""  # the developer's real key must never be used by tests
 os.environ["BREVO_SENDER_EMAIL"] = ""
+os.environ["RATE_LIMIT_ENABLED"] = "false"  # dedicated tests switch it on when they need it
 _prepare_database()
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -58,6 +60,13 @@ class Api:
 def client():
     Base.metadata.drop_all(engine)  # start every run from a clean slate
     with TestClient(app) as c:  # startup: create tables, migrations, seed
+        # the first person to sign up owns the system (administrator), so create the test admin before anything else
+        r = c.post("/api/auth/signup", json={
+            "login_id": "pytest_admin", "email": "pytest_admin@example.com", "password": PASSWORD, "confirm_password": PASSWORD,
+        })
+        assert r.status_code == 201, r.text
+        assert r.json()["user"]["role"] == "admin"
+        c.admin_token = r.json()["token"]
         yield c
 
 
@@ -68,11 +77,26 @@ def anon(client):
 
 @pytest.fixture(scope="session")
 def api(client):
-    r = client.post("/api/auth/signup", json={
-        "login_id": "pytest_admin", "email": "pytest_admin@example.com", "password": PASSWORD, "confirm_password": PASSWORD,
-    })
-    assert r.status_code == 201, r.text
-    return Api(client, r.json()["token"])
+    return Api(client, client.admin_token)
+
+
+@pytest.fixture(scope="session")
+def make_user(client, api):
+    """Factory: make_user("manager") -> an Api signed in as a new user with that role."""
+    counter = {"n": 0}
+
+    def make(role: str = "staff") -> Api:
+        counter["n"] += 1
+        login = f"{role[:3]}{counter['n']:03d}{uuid.uuid4().hex[:4]}"
+        r = client.post("/api/auth/signup", json={"login_id": login, "email": f"{login}@example.com", "password": PASSWORD, "confirm_password": PASSWORD})
+        assert r.status_code == 201, r.text
+        uid = r.json()["user"]["id"]
+        if role != "staff":
+            up = api.put(f"/users/{uid}", json={"role": role, "active": True})
+            assert up.status_code == 200, up.text
+        return Api(client, r.json()["token"])
+
+    return make
 
 
 @pytest.fixture(autouse=True)

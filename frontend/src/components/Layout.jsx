@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Icon, LogoMark } from './icons.jsx'
 import { Menu } from './ui.jsx'
+import { atLeast, ROLE_LABEL } from '../perm.js'
 
 const cls = ({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')
 
@@ -48,11 +49,14 @@ export default function Layout({ user, onLogout }) {
             <NavLink to="/stock" className={cls}>Stock</NavLink>
             <NavLink to="/contacts" className={cls}>Contacts</NavLink>
             <NavLink to="/moves" className={cls}>Move History</NavLink>
-            <Menu trigger={(open, toggle) => <GroupTrigger label="Settings" active={pathname.startsWith('/settings')} open={open} toggle={toggle} />}>
-              <MenuItem to="/settings/warehouses" icon="warehouse" title="Warehouse" desc="Names, codes and addresses" />
-              <MenuItem to="/settings/locations" icon="pin" title="Locations" desc="Racks, rooms and stock areas" />
-              <MenuItem to="/settings/taxes" icon="tag" title="Taxes" desc="GST slabs and category defaults" />
-            </Menu>
+            {atLeast(user, 'admin') && (
+              <Menu trigger={(open, toggle) => <GroupTrigger label="Settings" active={pathname.startsWith('/settings')} open={open} toggle={toggle} />}>
+                <MenuItem to="/settings/warehouses" icon="warehouse" title="Warehouse" desc="Names, codes and addresses" />
+                <MenuItem to="/settings/locations" icon="pin" title="Locations" desc="Racks, rooms and stock areas" />
+                <MenuItem to="/settings/taxes" icon="tag" title="Taxes" desc="GST slabs and category defaults" />
+                <MenuItem to="/settings/users" icon="user" title="Users" desc="Roles and access" />
+              </Menu>
+            )}
           </nav>
 
           <Menu
@@ -65,8 +69,9 @@ export default function Layout({ user, onLogout }) {
               </button>
             )}
           >
-            <div className="menu-head"><b>{user.login_id}</b><small>{user.email}</small></div>
+            <div className="menu-head"><b>{user.login_id}</b><small>{user.email}</small><span className="role-pill">{ROLE_LABEL[user.role]}</span></div>
             <NavLink to="/profile" className="menu-item slim"><Icon name="user" size={16} />My Profile</NavLink>
+            {atLeast(user, 'manager') && <NavLink to="/activity" className="menu-item slim"><Icon name="clock" size={16} />Activity log</NavLink>}
             <a className="menu-item slim danger" onClick={() => { onLogout(); nav('/login') }}><Icon name="logout" size={16} />Log out</a>
           </Menu>
         </div>

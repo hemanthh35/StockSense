@@ -8,7 +8,8 @@ docker compose exec backend python -m app.demo --reset    # loads the demo data
 ```
 
 Open http://localhost:5173 and sign in as **`demo_admin`** (the password is `DEMO_PASSWORD` in
-[`backend/app/demo.py`](backend/app/demo.py)). Re-run the `--reset` command any time to put the data back exactly
+[`backend/app/demo.py`](backend/app/demo.py)). Two more accounts share that password so you can show the roles:
+**`demo_manager`** (inventory manager) and **`demo_staff`** (warehouse staff). Re-run the `--reset` command any time to put the data back exactly
 as it starts below, for example between two run-throughs.
 
 **What the data contains:** two warehouses (Main Warehouse `WH`, North Depot `ND`), 18 products with HSN codes, purchase
@@ -19,6 +20,7 @@ a cross-warehouse transfer, a cancelled receipt and a few stock counts.
 ## The walkthrough
 
 ### 1. Dashboard: "one glance at the business" (1 min)
+*(Every list in the app pages on the server, 25 rows at a time, so it stays fast with tens of thousands of records; see the Performance table in the README.)*
 - Three cards show open work with a status bar and **late / waiting / scheduled** counts. The red "late" number is
   a receipt that should have arrived three days ago.
 - Below: **Low stock alerts** and **Recent movements**.
@@ -80,6 +82,14 @@ a cross-warehouse transfer, a cancelled receipt and a few stock counts.
 - **Products → Import**: download the template, add a row, upload it. You get a row-by-row **preview**
   (new / update / skipped, with reasons) before anything is written. **Export CSV** exists on products, stock, move
   history and every operation list.
+
+### 8b. Roles, activity and safe editing (1 min)
+- Stay signed in as **`demo_admin`** and open **Settings → Users**: three roles with a one-line description each. Open **Activity
+  log** (account menu): every change with who and when; click a row to see before → after. Any document has its own **Activity** panel.
+- Sign in as **`demo_staff`** (another browser window works well). The Settings menu and the New / Import buttons are gone. Open a
+  Ready delivery: staff can **pick, pack and validate** it, but a receipt's fields are read-only ("only a manager can change what's on it").
+- **Conflict protection:** open the same draft in two windows as `demo_manager`, save in one, then save in the other. The second is
+  refused with *"Someone else changed this delivery"* and a Reload button, so nothing is overwritten.
 
 ### 9. Housekeeping (30 s)
 - **Products → Categories**: rename or delete categories. A category in use can't be deleted.

@@ -1,7 +1,8 @@
 import { Fragment, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
-import { useApi, useDebounced } from '../hooks'
+import { useApi, useDebounced, usePaged } from '../hooks'
+import { atLeast } from '../perm.js'
 import { Icon } from '../components/icons.jsx'
 import CategoryManager from '../components/CategoryManager.jsx'
 import ProductImport from '../components/ProductImport.jsx'
@@ -11,14 +12,16 @@ import { Empty, ExportButton, Field, Modal, PageHeader, Segmented, Pager, Search
 
 const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, cost_price: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
 
-export function Products() {
+export function Products({ user }) {
+  const canManage = atLeast(user, 'manager')
   const [params, setParams] = useSearchParams()
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('')
   const dq = useDebounced(q)
   const [showArchived, setShowArchived] = useState(false)
   const [importing, setImporting] = useState(false)
-  const { data, reload } = useApi('/products', { q: dq, category_id: cat, include_archived: showArchived ? 'true' : '' })
+  const paged = usePaged('/products', { q: dq, category_id: cat, include_archived: showArchived ? 'true' : '' }, { size: 25 })
+  const { reload } = paged
   const cats = useApi('/categories')
   const locs = useApi('/locations', { internal_only: true }).data || []
   const taxes = useApi('/taxes').data || []
@@ -26,8 +29,7 @@ export function Products() {
   const [newCat, setNewCat] = useState('')
   const [manageCats, setManageCats] = useState(false)
   const [toast, notify, close] = useToast()
-  const rows = data || []
-  const pager = usePager(rows)
+  const rows = paged.rows
 
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value })
   const catDefault = (cats.data || []).find((c) => c.id === Number(form?.category_id))?.default_tax_id
@@ -48,7 +50,7 @@ export function Products() {
       if (form.id) await api(`/products/${form.id}`, { method: 'PUT', body })
       else await api('/products', { method: 'POST', body })
       closeForm(); reload(); notify('Product saved', 'ok')
-    } catch (x) { notify(x.message, 'error') }
+    } catch (x) { notify(x.message, 'error'); if (/changed by someone else/.test(x.message)) { closeForm(); reload() } }
   }
   const addCat = async () => {
     if (!newCat.trim()) return
@@ -63,9 +65,9 @@ export function Products() {
         subtitle="Your catalogue — SKUs, categories, costs and reorder rules."
         actions={<>
           <ExportButton path="/export/products.csv" params={{ include_archived: showArchived ? 'true' : '' }} filename="products.csv" onError={(m) => notify(m, 'error')} />
-          <button className="btn" onClick={() => setImporting(true)}><Icon name="upload" size={16} />Import</button>
-          <button className="btn" onClick={() => setManageCats(true)}><Icon name="tag" size={16} />Categories</button>
-          <button className="btn primary" onClick={() => setForm({ ...emptyP })}><Icon name="plus" size={16} />New product</button>
+          {canManage && <button className="btn" onClick={() => setImporting(true)}><Icon name="upload" size={16} />Import</button>}
+          {canManage && <button className="btn" onClick={() => setManageCats(true)}><Icon name="tag" size={16} />Categories</button>}
+          {canManage && <button className="btn primary" onClick={() => setForm({ ...emptyP })}><Icon name="plus" size={16} />New product</button>}
         </>}
       />
       <div className="card">
@@ -82,9 +84,9 @@ export function Products() {
           <table className="rows">
             <thead><tr><th>Product</th><th>Category</th><th>UoM</th><th>Tax</th><th className="num">Sales price</th><th className="num">Avg cost</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
             <tbody>
-              {!data && <TableSkeleton cols={8} />}
-              {pager.slice.map((p) => (
-                <tr key={p.id} style={p.active ? undefined : { opacity: 0.6 }} onClick={() => setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
+              {paged.loading && !rows.length && <TableSkeleton cols={8} />}
+              {rows.map((p) => (
+                <tr key={p.id} style={{ opacity: p.active ? 1 : 0.6, cursor: canManage ? 'pointer' : 'default' }} onClick={() => canManage && setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
                   <td className="strong">{p.name} {!p.active && <ArchivedTag />}<span className="sub mono">{p.sku}</span></td>
                   <td>{p.category ? <span className="tag">{p.category}</span> : <span className="dim">—</span>}</td>
                   <td className="muted">{p.uom}</td>
@@ -98,8 +100,8 @@ export function Products() {
             </tbody>
           </table>
         </div>
-        {data && !rows.length && <Empty icon="box" title={q || cat ? 'No matches' : 'No products yet'} hint={q || cat ? 'Try a different search.' : 'Add your first product to start tracking stock.'} />}
-        <Pager p={pager} />
+        {!paged.loading && !rows.length && <Empty icon="box" title={q || cat ? 'No matches' : 'No products yet'} hint={q || cat ? 'Try a different search.' : canManage ? 'Add your first product to start tracking stock.' : 'Ask a manager to add products.'} />}
+        <Pager p={paged} />
       </div>
 
       {importing && <ProductImport onClose={() => setImporting(false)} onDone={() => { setImporting(false); reload(); cats.reload() }} notify={notify} />}
@@ -172,12 +174,12 @@ function StockLevels({ tabs }) {
   const [q, setQ] = useState('')
   const [wh, setWh] = useState('')
   const dq = useDebounced(q)
-  const { data, reload } = useApi('/stock', { q: dq, warehouse_id: wh })
+  const paged = usePaged('/stock', { q: dq, warehouse_id: wh }, { size: 10 })
+  const { reload } = paged
   const whs = useApi('/warehouses').data || []
   const [edit, setEdit] = useState(null)
   const [toast, notify, close] = useToast()
-  const rows = data || []
-  const pager = usePager(rows)
+  const rows = paged.rows
 
   const diff = edit ? Number(edit.counted_qty || 0) - edit.current : 0
   const submit = async (e) => {
@@ -209,8 +211,8 @@ function StockLevels({ tabs }) {
           <table>
             <thead><tr><th>Product</th><th className="num">Per unit cost</th><th className="num">On hand</th><th className="num">Free to use</th><th style={{ width: 110 }} /></tr></thead>
             <tbody>
-              {!data && <TableSkeleton cols={5} />}
-              {pager.slice.map((r) => (
+              {paged.loading && !rows.length && <TableSkeleton cols={5} />}
+              {rows.map((r) => (
                 <Fragment key={r.product_id}>
                   <tr>
                     <td className="strong">{r.name}<span className="sub mono">{r.sku}</span></td>
@@ -231,8 +233,8 @@ function StockLevels({ tabs }) {
             </tbody>
           </table>
         </div>
-        {data && !rows.length && <Empty icon="box" title="No stock to show" hint="Add products or change the filters." />}
-        <Pager p={pager} sizes={[5, 10, 25]} />
+        {!paged.loading && !rows.length && <Empty icon="box" title="No stock to show" hint="Add products or change the filters." />}
+        <Pager p={paged} sizes={[5, 10, 25, 50]} />
       </div>
 
       {edit && (

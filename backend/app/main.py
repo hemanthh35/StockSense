@@ -3,39 +3,20 @@ import logging
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
-from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
+from . import audit  # noqa: F401  (registers the audit_log table with the metadata)
 from .config import settings as app_settings
 from .db import SessionLocal, engine
 from .digest import run_digest_if_due
-from .stock import utcnow
+from .migrations import MIGRATIONS, run_migrations  # noqa: F401  (MIGRATIONS re-exported for older callers)
 from .models import Base
-from .routers import auth, exports, inventory, notifications, operations, parties, products, reports, settings
+from .routers import auth, exports, inventory, notifications, operations, parties, products, reports, settings, users
 from .seed import seed
+from .stock import utcnow
 
-
-# create_all() only creates missing tables, so new columns on existing tables are added here.
-MIGRATIONS = [
-    "ALTER TABLE categories ADD COLUMN IF NOT EXISTS default_tax_id INTEGER REFERENCES taxes(id)",
-    "ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_id INTEGER REFERENCES taxes(id)",
-    "ALTER TABLE products ADD COLUMN IF NOT EXISTS hsn_code VARCHAR(20)",
-    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS unit_price DOUBLE PRECISION DEFAULT 0",
-    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS tax_rate DOUBLE PRECISION DEFAULT 0",
-    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS tax_name VARCHAR(60)",
-    "ALTER TABLE warehouses ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
-    "ALTER TABLE locations ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
-    "ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
-    "ALTER TABLE operations ADD COLUMN IF NOT EXISTS picked_at TIMESTAMP",
-    "ALTER TABLE operations ADD COLUMN IF NOT EXISTS packed_at TIMESTAMP",
-    "ALTER TABLE operations ADD COLUMN IF NOT EXISTS party_id INTEGER REFERENCES parties(id)",
-    "ALTER TABLE operations ADD COLUMN IF NOT EXISTS backorder_of_id INTEGER REFERENCES operations(id)",
-    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS ordered_qty DOUBLE PRECISION",
-    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION",
-    "ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION NOT NULL DEFAULT 0",
-    "ALTER TABLE products ADD COLUMN IF NOT EXISTS avg_cost DOUBLE PRECISION NOT NULL DEFAULT 0",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS low_stock_digest BOOLEAN NOT NULL DEFAULT FALSE",
-]
+log = logging.getLogger("stocksense")
 
 
 def _digest_tick() -> None:
@@ -50,15 +31,18 @@ async def _digest_loop() -> None:
         try:
             await asyncio.to_thread(_digest_tick)
         except Exception:  # never let a failed email kill the loop
-            logging.getLogger("stocksense").exception("digest check failed")
+            log.exception("digest check failed")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    problem = app_settings.check_secure()
+    if problem:
+        if app_settings.production:
+            raise RuntimeError(f"Refusing to start in production: {problem}")
+        log.warning("Insecure configuration (fine for local development only): %s", problem)
     Base.metadata.create_all(engine)
-    with engine.begin() as conn:
-        for stmt in MIGRATIONS:
-            conn.execute(text(stmt))
+    run_migrations(engine)
     with SessionLocal() as db:
         seed(db)
     task = asyncio.create_task(_digest_loop()) if app_settings.digest_enabled else None
@@ -72,15 +56,23 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="StockSense API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=app_settings.cors_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-for r in (auth, settings, products, parties, operations, inventory, reports, exports, notifications):
+for r in (auth, users, settings, products, parties, operations, inventory, reports, exports, notifications):
     app.include_router(r.router, prefix="/api")
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    """Liveness plus a real database round-trip, so an orchestrator can tell 'up' from 'up but broken'."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True, "database": "up"}
+    except Exception:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse({"ok": False, "database": "down"}, status_code=503)

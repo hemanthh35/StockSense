@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useApi, useDebounced } from '../hooks'
+import { api } from '../api'
+import { useApi, useDebounced, usePaged } from '../hooks'
+import { canEditDocs } from '../perm.js'
 import { Icon } from '../components/icons.jsx'
 import {
-  Empty, ExportButton, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, money, usePager,
+  Empty, ExportButton, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, money,
 } from '../components/ui.jsx'
 
 export const KINDS = {
@@ -13,35 +15,47 @@ export const KINDS = {
   adjustments: { type: 'ADJ', title: 'Adjustments', single: 'Adjustment', sub: 'Inventory counts reconciled against records.', partner: 'Contact', flow: ['done'] },
 }
 const VIEW_OPTS = [{ value: 'list', label: 'List', icon: 'list' }, { value: 'kanban', label: 'Kanban', icon: 'kanban' }]
-const COL_CAP = 8
+const COLUMN_PAGE = 8
 
-function Kanban({ rows, statuses, open }) {
-  const [more, setMore] = useState({})
+/** One kanban column. It asks the server for its own status, 8 cards at a time, so a board with thousands of
+ *  documents never loads them all. */
+function KanbanColumn({ status, filters, open }) {
+  const [items, setItems] = useState([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(true)
+  const key = JSON.stringify({ ...filters, status })
+
+  useEffect(() => { setItems([]); setPage(1) }, [key])
+  useEffect(() => {
+    let live = true
+    setLoading(true)
+    api('/operations', { params: { ...filters, status, page, page_size: COLUMN_PAGE } })
+      .then((d) => { if (live) { setItems((old) => (page === 1 ? d.items : [...old, ...d.items])); setTotal(d.total) } })
+      .catch(() => {})
+      .finally(() => live && setLoading(false))
+    return () => { live = false }
+    // eslint-disable-next-line
+  }, [key, page])
+
+  if (status === 'cancelled' && !loading && total === 0) return null
   return (
-    <div className="kanban">
-      {statuses.filter((s) => s !== 'cancelled' || rows.some((o) => o.status === 'cancelled')).map((s) => {
-        const col = rows.filter((o) => o.status === s)
-        const shown = more[s] ? col : col.slice(0, COL_CAP)
-        return (
-          <div key={s} className="col">
-            <div className="col-head"><Status value={s} /><span className="count">{col.length}</span></div>
-            {shown.map((o) => (
-              <button key={o.id} className="kcard" onClick={() => open(o)}>
-                <div className="ref mono">{o.reference}</div>
-                <div className="muted small" style={{ marginTop: 2 }}>{o.contact || 'No contact'}</div>
-                <div className="meta"><span className={o.late ? 'neg' : ''}>{fmtDate(o.schedule_date)}</span>{o.late && <span className="neg">Late</span>}</div>
-              </button>
-            ))}
-            {col.length > COL_CAP && !more[s] && <button className="col-more" onClick={() => setMore({ ...more, [s]: true })}>Show {col.length - COL_CAP} more</button>}
-            {!col.length && <div className="col-empty">Nothing here</div>}
-          </div>
-        )
-      })}
+    <div className="col">
+      <div className="col-head"><Status value={status} /><span className="count">{total}</span></div>
+      {items.map((o) => (
+        <button key={o.id} className="kcard" onClick={() => open(o)}>
+          <div className="ref mono">{o.reference}</div>
+          <div className="muted small" style={{ marginTop: 2 }}>{o.contact || 'No contact'}</div>
+          <div className="meta"><span className={o.late ? 'neg' : ''}>{fmtDate(o.schedule_date)}</span>{o.late && <span className="neg">Late</span>}</div>
+        </button>
+      ))}
+      {items.length < total && <button className="col-more" disabled={loading} onClick={() => setPage(page + 1)}>{loading ? 'Loading…' : `Show ${Math.min(COLUMN_PAGE, total - items.length)} more`}</button>}
+      {!items.length && !loading && <div className="col-empty">Nothing here</div>}
     </div>
   )
 }
 
-export function OperationList() {
+export function OperationList({ user }) {
   const { kind } = useParams()
   const cfg = KINDS[kind]
   const [view, setView] = useState('list')
@@ -50,15 +64,16 @@ export function OperationList() {
   const [wh, setWh] = useState('')
   const dq = useDebounced(q)
   const whs = useApi('/warehouses').data || []
-  const { data } = useApi('/operations', { type: cfg?.type, q: dq, status, warehouse_id: wh }, [kind])
+  const filters = { type: cfg?.type, q: dq, warehouse_id: wh }
+  const paged = usePaged('/operations', { ...filters, status }, { size: 25, deps: [kind], enabled: view === 'list' && !!cfg })
   const nav = useNavigate()
-  const rows = data || []
-  const pager = usePager(rows)
+  const rows = paged.rows
   useEffect(() => { setQ(''); setStatus(''); setWh('') }, [kind])
   if (!cfg) return <div className="muted">Unknown page</div>
   const open = (o) => nav(`/operations/${kind}/${o.id}`)
   const statuses = cfg.flow.concat(['cancelled'])
   const filtered = q || status || wh
+  const canCreate = canEditDocs(user, cfg.type)
 
   return (
     <>
@@ -69,13 +84,13 @@ export function OperationList() {
           <ExportButton path="/export/operations.csv" params={{ type: cfg.type, q: dq, status, warehouse_id: wh }} filename={`${kind}.csv`} />
           {kind === 'adjustments'
             ? <Link className="btn primary" to="/stock"><Icon name="sliders" size={16} />Update stock</Link>
-            : <Link className="btn primary" to={`/operations/${kind}/new`}><Icon name="plus" size={16} />New {cfg.single.toLowerCase()}</Link>}
+            : canCreate && <Link className="btn primary" to={`/operations/${kind}/new`}><Icon name="plus" size={16} />New {cfg.single.toLowerCase()}</Link>}
         </>}
       />
       <div className="card">
         <div className="toolbar">
           <SearchInput value={q} onChange={setQ} />
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} disabled={view === 'kanban'} title={view === 'kanban' ? 'The board already groups by status' : undefined}>
             <option value="">All statuses</option>
             {statuses.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
           </select>
@@ -95,8 +110,8 @@ export function OperationList() {
               <table className="rows">
                 <thead><tr><th>Reference</th><th>Contact</th><th>Schedule date</th><th>Responsible</th>{kind !== 'adjustments' && <th className="num">Total</th>}<th>Status</th></tr></thead>
                 <tbody>
-                  {!data && <TableSkeleton cols={6} />}
-                  {pager.slice.map((o) => (
+                  {paged.loading && !rows.length && <TableSkeleton cols={6} />}
+                  {rows.map((o) => (
                     <tr key={o.id} onClick={() => open(o)}>
                       <td className="mono strong">{o.reference}</td>
                       <td>{o.contact || <span className="dim">—</span>}</td>
@@ -109,17 +124,19 @@ export function OperationList() {
                 </tbody>
               </table>
             </div>
-            {data && !rows.length && (
+            {!paged.loading && !rows.length && (
               <Empty
                 title={filtered ? 'No matches' : `No ${cfg.title.toLowerCase()} yet`}
                 hint={filtered ? 'Try a different search or status filter.' : cfg.sub}
-                action={!filtered && kind !== 'adjustments' && <Link className="btn primary sm" to={`/operations/${kind}/new`}>Create the first one</Link>}
+                action={!filtered && kind !== 'adjustments' && canCreate && <Link className="btn primary sm" to={`/operations/${kind}/new`}>Create the first one</Link>}
               />
             )}
-            <Pager p={pager} />
+            <Pager p={paged} />
           </>
         ) : (
-          <Kanban rows={rows} statuses={statuses} open={open} />
+          <div className="kanban">
+            {statuses.map((s) => <KanbanColumn key={s} status={s} filters={filters} open={open} />)}
+          </div>
         )}
       </div>
     </>

@@ -1,49 +1,56 @@
 from datetime import date
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, case, func, not_, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
-from .. import pricing, stock
-from ..filters import op_filters
+from .. import audit, pricing, stock
+from ..conflict import check_version
 from ..db import get_db
-from ..deps import current_user
+from ..deps import current_user, ensure_can_edit_docs
+from ..filters import op_filters
 from ..models import Location, Operation, OperationLine, Party, Product, User, Warehouse
+from ..pagination import PageParams, count_rows, envelope, slice_stmt
 from .parties import brief as party_brief
 
 router = APIRouter(tags=["operations"])
 
 TYPES = {"IN": "Receipt", "OUT": "Delivery", "INT": "Internal Transfer", "ADJ": "Adjustment"}
+BIG = 1_000_000_000
+NOT_ENOUGH = "Not enough stock: someone else just used it. Please review the document and try again."
 
 
 class LineIn(BaseModel):
     product_id: int
-    quantity: float
-    unit_price: float | None = None  # blank = product's unit cost
+    quantity: Annotated[float, Field(le=BIG)]
+    unit_price: Annotated[float, Field(ge=0, le=BIG)] | None = None  # blank = the product's default price
 
 
 class ValidateLine(BaseModel):
     line_id: int
-    done_qty: float
+    done_qty: Annotated[float, Field(le=BIG)]
 
 
 class ValidateIn(BaseModel):
     """Optional body for /validate: quantities actually processed, and what to do with the rest."""
 
-    lines: list[ValidateLine] | None = None
+    lines: list[ValidateLine] | None = Field(default=None, max_length=500)
     backorder: bool = True
 
 
 class OperationIn(BaseModel):
-    type: str
-    contact: str | None = None
+    type: str = Field(max_length=3)
+    contact: str | None = Field(default=None, max_length=150)
     party_id: int | None = None  # a saved supplier/customer; its name becomes the contact
     schedule_date: date | None = None
     warehouse_id: int | None = None
     source_location_id: int | None = None
     dest_location_id: int | None = None
-    lines: list[LineIn] = []
+    lines: list[LineIn] = Field(default=[], max_length=500)
+    version: int | None = None  # the version the editor loaded, for optimistic locking
 
 
 def loc_brief(l: Location) -> dict:
@@ -68,6 +75,7 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
         "type": op.type,
         "type_label": TYPES[op.type],
         "status": op.status,
+        "version": op.version,
         "contact": op.contact,
         "party": party_brief(op.party) if op.party else None,
         "schedule_date": op.schedule_date.isoformat() if op.schedule_date else None,
@@ -193,10 +201,14 @@ def _party_for(db: Session, op_type: str, party_id: int | None) -> Party | None:
 
 
 def _validate_lines(db: Session, lines: list[LineIn]) -> None:
+    if not lines:
+        return
+    ids = {ln.product_id for ln in lines}
+    found = {p.id: p for p in db.scalars(select(Product).where(Product.id.in_(ids)))}  # one query, not one per line
     for ln in lines:
         if ln.quantity <= 0:
             raise HTTPException(422, "Quantity must be greater than zero")
-        product = db.get(Product, ln.product_id)
+        product = found.get(ln.product_id)
         if not product:
             raise HTTPException(422, "Unknown product")
         if not product.active:
@@ -204,22 +216,57 @@ def _validate_lines(db: Session, lines: list[LineIn]) -> None:
 
 
 def _make_lines(db: Session, lines: list[LineIn], op_type: str | None = None) -> list[OperationLine]:
+    if not lines:
+        return []
+    ids = {l.product_id for l in lines}
+    found = {p.id: p for p in db.scalars(select(Product).options(joinedload(Product.tax)).where(Product.id.in_(ids)))}
     out = []
     for l in lines:
-        product = db.get(Product, l.product_id)
+        product = found[l.product_id]
         ln = OperationLine(product_id=product.id, quantity=l.quantity)
         pricing.fill_line(ln, product, l.unit_price, op_type)
         out.append(ln)
     return out
 
 
+def _lines_summary(lines) -> str:
+    n = len(lines)
+    qty = sum(float(l.quantity) for l in lines)
+    return f"{n} line{'s' if n != 1 else ''}, {qty:g} units"
+
+
+HEADER = ["contact", "party_id", "schedule_date", "source_location_id", "dest_location_id"]
+
+
 @router.get("/contacts")
 def contacts(type: str | None = None, db: Session = Depends(get_db), _: User = Depends(current_user)):
     """Previously used contacts, so they can be picked instead of retyped."""
-    stmt = select(Operation.contact).where(Operation.contact.isnot(None), Operation.contact != "Inventory Adjustment").distinct()
+    stmt = select(Operation.contact).where(Operation.contact.isnot(None), Operation.contact != "Inventory Adjustment").distinct().limit(1000)
     if type:
         stmt = stmt.where(Operation.type == type)
     return sorted(c for c in db.scalars(stmt) if c.strip())
+
+
+# ------------------------------------------------------------------ list
+def operations_page(
+    db: Session, *, type=None, status=None, q=None, warehouse_id=None, location_id=None, category_id=None, page: PageParams | None = None
+):
+    """Documents newest first. With `page` this returns the paged envelope, otherwise the full list."""
+    base = op_filters(
+        select(Operation), type=type, status=status, warehouse_id=warehouse_id, location_id=location_id, category_id=category_id, q=q
+    )
+    stmt = base.options(
+        selectinload(Operation.lines),
+        joinedload(Operation.party),
+        joinedload(Operation.warehouse),
+        joinedload(Operation.responsible),
+        joinedload(Operation.source_location).joinedload(Location.warehouse),
+        joinedload(Operation.dest_location).joinedload(Location.warehouse),
+    ).order_by(Operation.id.desc())
+    if page is None or not page.enabled:
+        return [op_out(db, o, with_lines=False) for o in db.scalars(stmt)]
+    total = count_rows(db, base)
+    return envelope([op_out(db, o, with_lines=False) for o in db.scalars(slice_stmt(stmt, page))], total, page)
 
 
 @router.get("/operations")
@@ -230,20 +277,20 @@ def list_operations(
     warehouse_id: int | None = None,
     location_id: int | None = None,
     category_id: int | None = None,
+    page: PageParams = Depends(),
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
-    stmt = op_filters(
-        select(Operation).options(selectinload(Operation.lines)).order_by(Operation.id.desc()),
-        type=type, status=status, warehouse_id=warehouse_id, location_id=location_id, category_id=category_id, q=q,
-    )
-    return [op_out(db, o, with_lines=False) for o in db.scalars(stmt)]
+    return operations_page(db, type=type, status=status, q=q, warehouse_id=warehouse_id, location_id=location_id,
+                           category_id=category_id, page=page)
 
 
+# ------------------------------------------------------------------ create / read / update
 @router.post("/operations", status_code=201)
 def create_operation(body: OperationIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     if body.type not in ("IN", "OUT", "INT"):
         raise HTTPException(422, "Type must be IN, OUT or INT (use Stock > Update for adjustments)")
+    ensure_can_edit_docs(user, body.type)
     _validate_lines(db, body.lines)
     wh, src, dst = _resolve_locations(db, body.type, body.warehouse_id, body.source_location_id, body.dest_location_id)
     party = _party_for(db, body.type, body.party_id)
@@ -261,6 +308,8 @@ def create_operation(body: OperationIn, db: Session = Depends(get_db), user: Use
     )
     op.lines = _make_lines(db, body.lines, body.type)
     db.add(op)
+    db.flush()
+    audit.record(db, user, "create", "operation", op.id, op.reference, detail=_lines_summary(op.lines))
     db.commit()
     return op_out(db, _load(db, op.id))
 
@@ -270,12 +319,24 @@ def get_operation(op_id: int, db: Session = Depends(get_db), _: User = Depends(c
     return op_out(db, _load(db, op_id))
 
 
+@router.get("/operations/{op_id}/history")
+def operation_history(op_id: int, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    """Who did what to this document, newest first."""
+    if not db.get(Operation, op_id):
+        raise HTTPException(404, "Record not found")
+    return audit.history(db, "operation", op_id)
+
+
 @router.put("/operations/{op_id}")
-def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db), _: User = Depends(current_user)):
+def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     op = _load(db, op_id)
+    ensure_can_edit_docs(user, op.type)
+    check_version(op, body.version)
     if op.status not in ("draft", "waiting", "ready"):
         raise HTTPException(409, "Finished records cannot be edited")
     _validate_lines(db, body.lines)
+    before = audit.snapshot(op, HEADER)
+    lines_before = _lines_summary(op.lines)
     party = _party_for(db, op.type, body.party_id)
     op.party_id = party.id if party else None
     op.contact = party.name if party else body.contact
@@ -290,26 +351,54 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
     if op.status != "draft":  # edits invalidate the earlier availability check
         op.status = "draft"
     op.picked_at = op.packed_at = None
+    stock.touch(op)
+    changes = audit.diff(before, audit.snapshot(op, HEADER))
+    if (after := _lines_summary(op.lines)) != lines_before:
+        changes["lines"] = [lines_before, after]
+    audit.record(db, user, "update", "operation", op.id, op.reference, changes=changes or None)
     db.commit()
     return op_out(db, _load(db, op_id))
 
 
+# ------------------------------------------------------------------ workflow actions
+def _commit_or_conflict(db: Session) -> None:
+    """The database refuses negative stock. If two people raced for the last units, the loser gets a clear 409."""
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, NOT_ENOUGH)
+
+
 @router.post("/operations/{op_id}/{action}")
 def operation_action(
-    op_id: int, action: str, body: ValidateIn | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)
+    op_id: int,
+    action: str,
+    body: ValidateIn | None = None,
+    version: int | None = Query(None, description="the version the client is looking at (optimistic locking)"),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
 ):
     op = _load(db, op_id)
+    check_version(op, version)
     message = None
+    if action in ("duplicate", "cancel"):
+        ensure_can_edit_docs(user, op.type)  # anyone may work a document through its stages; changing it needs the right role
     if action == "duplicate":
         if op.type == "ADJ":
             raise HTTPException(409, "Adjustments cannot be duplicated")
+        party = op.party if op.party and op.party.active else None
         copy = Operation(
-            reference=stock.next_reference(db, op.warehouse, op.type), type=op.type, status="draft", contact=op.contact,
+            reference=stock.next_reference(db, op.warehouse, op.type), type=op.type, status="draft",
+            contact=party.name if party else op.contact, party_id=party.id if party else None,
             schedule_date=date.today(), responsible_id=user.id, warehouse_id=op.warehouse_id,
             source_location_id=op.source_location_id, dest_location_id=op.dest_location_id,
         )
         copy.lines = _make_lines(db, [LineIn(product_id=l.product_id, quantity=l.quantity) for l in op.lines], op.type)
         db.add(copy)
+        db.flush()
+        audit.record(db, user, "duplicate", "operation", op.id, op.reference, detail=f"copied to {copy.reference}")
+        audit.record(db, user, "create", "operation", copy.id, copy.reference, detail=f"copy of {op.reference}")
         db.commit()
         return op_out(db, _load(db, copy.id))
     try:
@@ -330,10 +419,67 @@ def operation_action(
             raise HTTPException(404, "Unknown action")
     except stock.WorkflowError as e:
         raise HTTPException(409, str(e))
-    db.commit()
+    except IntegrityError:  # the stock move itself tripped the non-negative rule: someone else took the units first
+        db.rollback()
+        raise HTTPException(409, NOT_ENOUGH)
+    audit.record(db, user, action, "operation", op.id, op.reference, detail=message or f"now {op.status}")
+    _commit_or_conflict(db)
     out = op_out(db, _load(db, op_id))
     out["message"] = message
     return out
+
+
+# ------------------------------------------------------------------ move history (one row per product line)
+def moves_page(
+    db: Session, *, q=None, status=None, direction=None, type=None, warehouse_id=None, location_id=None, category_id=None,
+    page: PageParams | None = None,
+):
+    """Drafts and cancelled records are not moves yet. Filtering, ordering and paging all happen in SQL."""
+    src, dst = aliased(Location), aliased(Location)
+    swh, dwh = aliased(Warehouse), aliased(Warehouse)
+    from_name = case((src.warehouse_id.isnot(None), func.concat(swh.short_code, "/", src.short_code)), else_=src.name)
+    to_name = case((dst.warehouse_id.isnot(None), func.concat(dwh.short_code, "/", dst.short_code)), else_=dst.name)
+    stmt = (
+        select(
+            Operation.id.label("op_id"), Operation.reference, Operation.type, Operation.contact, Operation.status,
+            Operation.schedule_date, Operation.done_at, OperationLine.quantity, Product.sku, Product.name.label("pname"),
+            src.type.label("src_type"), dst.type.label("dst_type"), from_name.label("from_name"), to_name.label("to_name"),
+        )
+        .select_from(Operation)
+        .join(OperationLine, OperationLine.operation_id == Operation.id)
+        .join(Product, Product.id == OperationLine.product_id)
+        .join(src, src.id == Operation.source_location_id)
+        .join(dst, dst.id == Operation.dest_location_id)
+        .outerjoin(swh, swh.id == src.warehouse_id)
+        .outerjoin(dwh, dwh.id == dst.warehouse_id)
+        .where(Operation.status.notin_(["draft", "cancelled"]))
+        .order_by(Operation.id.desc(), OperationLine.id)
+    )
+    stmt = op_filters(stmt, type=type, status=status, warehouse_id=warehouse_id, location_id=location_id, category_id=category_id)
+    if q:
+        like = f"%{q}%"  # a document match keeps all its lines; a product match shows just that product's line
+        stmt = stmt.where(or_(Operation.reference.ilike(like), Operation.contact.ilike(like), Product.name.ilike(like), Product.sku.ilike(like)))
+    is_in = and_(dst.type == "internal", src.type != "internal")
+    is_out = and_(src.type == "internal", dst.type != "internal")
+    if direction == "in":
+        stmt = stmt.where(is_in)
+    elif direction == "out":
+        stmt = stmt.where(is_out)
+    elif direction == "transfer":
+        stmt = stmt.where(not_(or_(is_in, is_out)))
+
+    def shape(r) -> dict:
+        d = "in" if (r.dst_type == "internal" and r.src_type != "internal") else "out" if (r.src_type == "internal" and r.dst_type != "internal") else "transfer"
+        when = r.done_at.date() if r.done_at else r.schedule_date
+        return {
+            "operation_id": r.op_id, "reference": r.reference, "type": r.type, "contact": r.contact, "status": r.status,
+            "date": when.isoformat() if when else None, "from": r.from_name, "to": r.to_name,
+            "product": f"[{r.sku}] {r.pname}", "quantity": float(r.quantity), "direction": d,
+        }
+
+    if page is None or not page.enabled:
+        return [shape(r) for r in db.execute(stmt)]
+    return envelope([shape(r) for r in db.execute(slice_stmt(stmt, page))], count_rows(db, stmt), page)
 
 
 @router.get("/moves")
@@ -345,44 +491,9 @@ def move_history(
     warehouse_id: int | None = None,
     location_id: int | None = None,
     category_id: int | None = None,
+    page: PageParams = Depends(),
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
-    """One row per product line; drafts and cancelled records are not moves yet."""
-    stmt = (
-        select(Operation)
-        .options(joinedload(Operation.lines).joinedload(OperationLine.product))
-        .where(Operation.status.notin_(["draft", "cancelled"]))
-        .order_by(Operation.id.desc())
-    )
-    stmt = op_filters(
-        stmt, type=type, status=status, warehouse_id=warehouse_id, location_id=location_id, category_id=category_id, q=q
-    )
-    rows = []
-    for op in db.scalars(stmt).unique():
-        d = direction_of(op)
-        if direction and d != direction:
-            continue
-        when = op.done_at.date() if op.done_at else op.schedule_date
-        needle = (q or "").lower()
-        op_match = not needle or needle in op.reference.lower() or needle in (op.contact or "").lower()
-        for ln in op.lines:
-            label = f"[{ln.product.sku}] {ln.product.name}"
-            if not op_match and needle not in label.lower():
-                continue  # searching a product: hide the other products on the same document
-            rows.append(
-                {
-                    "operation_id": op.id,
-                    "reference": op.reference,
-                    "type": op.type,
-                    "contact": op.contact,
-                    "status": op.status,
-                    "date": when.isoformat() if when else None,
-                    "from": op.source_location.full_name,
-                    "to": op.dest_location.full_name,
-                    "product": f"[{ln.product.sku}] {ln.product.name}",
-                    "quantity": ln.quantity,
-                    "direction": d,
-                }
-            )
-    return rows
+    return moves_page(db, q=q, status=status, direction=direction, type=type, warehouse_id=warehouse_id,
+                      location_id=location_id, category_id=category_id, page=page)

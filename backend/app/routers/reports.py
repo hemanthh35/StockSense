@@ -1,57 +1,78 @@
-"""Stock valuation (weighted average cost) and delivery margin."""
+"""Stock valuation (weighted average cost) and delivery margin, computed with grouped SQL and paged in the database."""
+import math
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import desc, func, or_, select
+from sqlalchemy.orm import Session, joinedload
 
 from ..db import get_db
 from ..deps import current_user
 from ..filters import op_filters
-from ..models import Operation, Product, User
+from ..models import Category, Operation, OperationLine, Product, User
+from ..pagination import PageParams
+from ..queries import cost_expr, internal_stock
 from ..stock import utcnow
-from .inventory import _internal_quants
 
 router = APIRouter(tags=["reports"])
 
 
+def _with_paging(report: dict, total: int, page: PageParams | None) -> dict:
+    if page is not None and page.enabled:
+        report.update({"items": report["rows"], "total": total, "page": page.page, "page_size": page.size,
+                       "pages": max(1, math.ceil(total / page.size))})
+    return report
+
+
 def valuation_rows(
-    db: Session, q: str | None, warehouse_id: int | None, location_id: int | None, category_id: int | None, include_zero: bool
+    db: Session, q: str | None, warehouse_id: int | None, location_id: int | None, category_id: int | None,
+    include_zero: bool, page: PageParams | None = None,
 ) -> dict:
-    totals: dict[int, float] = {}
-    for quant, _loc in _internal_quants(db, warehouse_id, location_id):
-        totals[quant.product_id] = totals.get(quant.product_id, 0) + quant.quantity
-
-    stmt = select(Product).where(Product.active.is_(True)).order_by(Product.name)
+    tot = internal_stock(warehouse_id, location_id).subquery()
+    qty = func.coalesce(tot.c.qty, 0)
+    cost = cost_expr()
+    conds = [Product.active.is_(True)]
     if category_id:
-        stmt = stmt.where(Product.category_id == category_id)
-    needle = (q or "").lower()
-    rows = []
-    for p in db.scalars(stmt):
-        qty = totals.get(p.id, 0)
-        if needle and needle not in p.name.lower() and needle not in p.sku.lower():
-            continue
-        if qty <= 0 and not include_zero:
-            continue
-        cost = p.avg_cost or p.cost_price or p.unit_cost
-        rows.append({
-            "product_id": p.id, "sku": p.sku, "name": p.name, "category": p.category.name if p.category else None,
-            "on_hand": qty, "avg_cost": round(cost, 4), "value": round(qty * cost, 2),
-            "sales_price": p.unit_cost, "retail_value": round(qty * p.unit_cost, 2),
-        })
-    rows.sort(key=lambda r: r["value"], reverse=True)
+        conds.append(Product.category_id == category_id)
+    if q:
+        like = f"%{q}%"
+        conds.append(or_(Product.name.ilike(like), Product.sku.ilike(like)))
+    if not include_zero:
+        conds.append(qty > 0)
 
-    by_cat: dict[str, float] = {}
-    for r in rows:
-        by_cat[r["category"] or "Uncategorised"] = by_cat.get(r["category"] or "Uncategorised", 0) + r["value"]
-    value = round(sum(r["value"] for r in rows), 2)
-    retail = round(sum(r["retail_value"] for r in rows), 2)
-    return {
+    value, retail = qty * cost, qty * Product.unit_cost
+    from_ = Product.__table__.outerjoin(tot, tot.c.product_id == Product.id)
+
+    stmt = (
+        select(Product, qty.label("qty"), value.label("value"), retail.label("retail"))
+        .select_from(from_).options(joinedload(Product.category)).where(*conds).order_by(desc("value"), Product.name)
+    )
+    total_rows = db.scalar(select(func.count()).select_from(from_).where(*conds)) or 0
+    if page is not None and page.enabled:
+        stmt = stmt.limit(page.size).offset(page.offset)
+    rows = [
+        {
+            "product_id": p.id, "sku": p.sku, "name": p.name, "category": p.category.name if p.category else None,
+            "on_hand": float(q_), "avg_cost": round(float(p.avg_cost or p.cost_price or p.unit_cost), 4),
+            "value": round(float(v), 2), "sales_price": p.unit_cost, "retail_value": round(float(r), 2),
+        }
+        for p, q_, v, r in db.execute(stmt)
+    ]
+
+    sums = db.execute(select(func.coalesce(func.sum(qty), 0), func.coalesce(func.sum(value), 0), func.coalesce(func.sum(retail), 0)).select_from(from_).where(*conds)).one()
+    by_cat = db.execute(
+        select(func.coalesce(Category.name, "Uncategorised"), func.sum(value).label("v"))
+        .select_from(from_.outerjoin(Category, Category.id == Product.category_id))
+        .where(*conds).group_by(Category.name).order_by(desc("v"))
+    ).all()
+    total_value, total_retail = round(float(sums[1]), 2), round(float(sums[2]), 2)
+    report = {
         "rows": rows,
-        "totals": {"on_hand": sum(r["on_hand"] for r in rows), "value": value, "retail_value": retail,
-                   "potential_margin": round(retail - value, 2)},
-        "by_category": [{"category": k, "value": round(v, 2)} for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1])],
+        "totals": {"on_hand": float(sums[0]), "value": total_value, "retail_value": total_retail,
+                   "potential_margin": round(total_retail - total_value, 2)},
+        "by_category": [{"category": name, "value": round(float(v), 2)} for name, v in by_cat],
     }
+    return _with_paging(report, total_rows, page)
 
 
 @router.get("/reports/valuation")
@@ -61,43 +82,49 @@ def valuation(
     location_id: int | None = None,
     category_id: int | None = None,
     include_zero: bool = False,
+    page: PageParams = Depends(),
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
     """What the stock on the shelves is worth at weighted-average purchase cost."""
-    return valuation_rows(db, q, warehouse_id, location_id, category_id, include_zero)
+    return valuation_rows(db, q, warehouse_id, location_id, category_id, include_zero, page)
 
 
-def margin_rows(db: Session, days: int, warehouse_id: int | None, category_id: int | None) -> dict:
+def margin_rows(db: Session, days: int, warehouse_id: int | None, category_id: int | None, page: PageParams | None = None) -> dict:
     since = utcnow() - timedelta(days=days)
-    stmt = op_filters(
-        select(Operation).options(selectinload(Operation.lines)),
-        type="OUT", status="done", warehouse_id=warehouse_id,
-    ).where(Operation.done_at >= since)
-    per: dict[int, dict] = {}
-    for op in db.scalars(stmt):
-        for ln in op.lines:
-            p = ln.product
-            if category_id and p.category_id != category_id:
-                continue
-            row = per.setdefault(p.id, {"product_id": p.id, "sku": p.sku, "name": p.name, "quantity": 0.0, "revenue": 0.0, "cost": 0.0})
-            cost = ln.cost_price if ln.cost_price is not None else (p.avg_cost or p.cost_price or p.unit_cost)
-            row["quantity"] += ln.quantity
-            row["revenue"] += ln.quantity * (ln.unit_price or 0)
-            row["cost"] += ln.quantity * cost
+    cost = func.coalesce(OperationLine.cost_price, cost_expr())
+    quantity = func.sum(OperationLine.quantity)
+    revenue = func.sum(OperationLine.quantity * OperationLine.unit_price)
+    spent = func.sum(OperationLine.quantity * cost)
+
+    def scoped(stmt):
+        stmt = stmt.select_from(Operation).join(OperationLine, OperationLine.operation_id == Operation.id).join(
+            Product, Product.id == OperationLine.product_id
+        ).where(Operation.type == "OUT", Operation.status == "done", Operation.done_at >= since)
+        stmt = op_filters(stmt, warehouse_id=warehouse_id)
+        return stmt.where(Product.category_id == category_id) if category_id else stmt
+
+    grouped = scoped(select(Product.id, Product.sku, Product.name, quantity, revenue, spent)).group_by(Product.id, Product.sku, Product.name)
+    total_rows = db.scalar(select(func.count()).select_from(grouped.subquery())) or 0
+    stmt = grouped.order_by((revenue - spent).desc(), Product.name)
+    if page is not None and page.enabled:
+        stmt = stmt.limit(page.size).offset(page.offset)
     rows = []
-    for r in per.values():
-        margin = r["revenue"] - r["cost"]
-        rows.append({**r, "revenue": round(r["revenue"], 2), "cost": round(r["cost"], 2), "margin": round(margin, 2),
-                     "margin_pct": round(margin / r["revenue"] * 100, 1) if r["revenue"] else 0})
-    rows.sort(key=lambda r: r["margin"], reverse=True)
-    revenue, cost = sum(r["revenue"] for r in rows), sum(r["cost"] for r in rows)
-    return {
+    for pid, sku, name, qty_, rev_, cost_ in db.execute(stmt):
+        rev_, cost_ = round(float(rev_), 2), round(float(cost_), 2)
+        margin_ = round(rev_ - cost_, 2)
+        rows.append({"product_id": pid, "sku": sku, "name": name, "quantity": float(qty_), "revenue": rev_, "cost": cost_,
+                     "margin": margin_, "margin_pct": round(margin_ / rev_ * 100, 1) if rev_ else 0})
+    t_rev, t_cost = db.execute(scoped(select(func.coalesce(func.sum(OperationLine.quantity * OperationLine.unit_price), 0),
+                                              func.coalesce(func.sum(OperationLine.quantity * cost), 0)))).one()
+    t_rev, t_cost = round(float(t_rev), 2), round(float(t_cost), 2)
+    report = {
         "days": days,
         "rows": rows,
-        "totals": {"revenue": round(revenue, 2), "cost": round(cost, 2), "margin": round(revenue - cost, 2),
-                   "margin_pct": round((revenue - cost) / revenue * 100, 1) if revenue else 0},
+        "totals": {"revenue": t_rev, "cost": t_cost, "margin": round(t_rev - t_cost, 2),
+                   "margin_pct": round((t_rev - t_cost) / t_rev * 100, 1) if t_rev else 0},
     }
+    return _with_paging(report, total_rows, page)
 
 
 @router.get("/reports/margin")
@@ -105,8 +132,9 @@ def margin(
     days: int = 30,
     warehouse_id: int | None = None,
     category_id: int | None = None,
+    page: PageParams = Depends(),
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
     """Revenue (before tax) against average cost for deliveries validated in the last `days` days."""
-    return margin_rows(db, max(1, min(days, 3650)), warehouse_id, category_id)
+    return margin_rows(db, max(1, min(days, 3650)), warehouse_id, category_id, page)

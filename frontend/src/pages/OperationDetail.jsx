@@ -2,12 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { useApi } from '../hooks'
+import { canEditDocs } from '../perm.js'
 import { Icon } from '../components/icons.jsx'
+import History from '../components/History.jsx'
 import PartyModal from '../components/PartyModal.jsx'
+import ProductPicker from '../components/ProductPicker.jsx'
 import { Field, Modal, PageHeader, Status, Stepper, Toast, money, num, useToast } from '../components/ui.jsx'
 import { KINDS } from './Operations.jsx'
 
 const PATH = { IN: 'receipts', OUT: 'deliveries', INT: 'transfers', ADJ: 'adjustments' }
+const CONFLICT = /changed by someone else/i
 const blank = () => ({ warehouse_id: '', party_id: '', contact: '', schedule_date: new Date().toISOString().slice(0, 10), source_location_id: '', dest_location_id: '', lines: [] })
 
 const toForm = (o) => ({
@@ -17,7 +21,7 @@ const toForm = (o) => ({
   schedule_date: o.schedule_date,
   source_location_id: o.source_location.id,
   dest_location_id: o.dest_location.id,
-  lines: o.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit_price: l.unit_price })),
+  lines: o.lines.map((l) => ({ product_id: l.product_id, label: l.product, quantity: l.quantity, unit_price: l.unit_price })),
 })
 
 /** A comparable fingerprint of what the user can edit, used to detect unsaved changes. */
@@ -26,16 +30,19 @@ const snap = (f) => JSON.stringify({
   l: f.lines.map((l) => [String(l.product_id), Number(l.quantity), Number(l.unit_price)]),
 })
 
+// money is rounded to whole paise per line, half-up, exactly as the server does, so the preview matches what gets saved
+const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100 + 1e-7) / 100
+
 function Totals({ lines }) {
   let sub = 0
   const groups = {}
   lines.forEach((l) => {
-    const base = (Number(l.quantity) || 0) * (Number(l.unit_price) || 0)
+    const base = r2((Number(l.quantity) || 0) * (Number(l.unit_price) || 0))
     sub += base
     if (l.tax_name) {
       const k = `${l.tax_name}|${l.tax_rate}`
       groups[k] = groups[k] || { name: l.tax_name, rate: Number(l.tax_rate), amount: 0 }
-      groups[k].amount += (base * l.tax_rate) / 100
+      groups[k].amount += r2((base * l.tax_rate) / 100)
     }
   })
   const list = Object.values(groups).sort((a, b) => a.rate - b.rate)
@@ -133,23 +140,31 @@ export default function OperationDetail({ user }) {
   const baseline = useRef(snap(blank()))
   const [toast, notify, closeToast] = useToast()
   const [busy, setBusy] = useState(false)
+  const [conflict, setConflict] = useState(false)
   const [partialOpen, setPartialOpen] = useState(false)
   const [newParty, setNewParty] = useState(null)
-  const products = useApi('/products').data || []
+  const [cache, setCache] = useState({}) // id -> product, for the tax and price of the products on this document
   const locs = useApi('/locations', { internal_only: true }).data || []
   const whs = useApi('/warehouses').data || []
   const partyKind = cfg?.type === 'IN' ? 'vendor' : cfg?.type === 'OUT' ? 'customer' : ''
   const parties = useApi('/parties', { kind: partyKind }, [kind])
   const contacts = useApi('/contacts', { type: cfg?.type }, [kind]).data || []
 
+  const remember = (products) => setCache((c) => ({ ...c, ...Object.fromEntries(products.map((p) => [p.id, p])) }))
+
   const hydrate = (o) => {
     const f = toForm(o)
     baseline.current = snap(f)
     setOp(o)
     setForm(f)
+    setConflict(false)
+    const missing = o.lines.map((l) => l.product_id).filter((pid) => !cache[pid])
+    if (missing.length) api('/products', { params: { ids: [...new Set(missing)].join(',') } }).then(remember).catch(() => {})
   }
+  const reloadDoc = () => api(`/operations/${id}`).then((o) => { hydrate(o); notify('Reloaded the latest version', 'info') }).catch((e) => notify(e.message, 'error'))
+
   useEffect(() => {
-    if (isNew) { setOp(null); setForm(blank()); baseline.current = snap(blank()) }
+    if (isNew) { setOp(null); setForm(blank()); baseline.current = snap(blank()); setConflict(false) }
     else api(`/operations/${id}`).then(hydrate).catch((e) => notify(e.message, 'error'))
     // eslint-disable-next-line
   }, [id, kind])
@@ -157,22 +172,24 @@ export default function OperationDetail({ user }) {
   const chosenWh = form.warehouse_id || (isNew ? whs[0]?.id : '') || ''
   if (!cfg) return <div className="muted">Unknown page</div>
   const status = op?.status || 'draft'
-  const editable = isNew || ['draft', 'waiting', 'ready'].includes(status)
-  const dirty = !isNew && snap(form) !== baseline.current
   const t = cfg.type
+  const canEdit = canEditDocs(user, t) // may this person change the document itself?
+  const open = isNew || ['draft', 'waiting', 'ready'].includes(status)
+  const editable = open && canEdit
+  const dirty = !isNew && editable && snap(form) !== baseline.current
   const priced = t !== 'ADJ'
   const usesParty = t === 'IN' || t === 'OUT'
   const shortLines = (op?.lines || []).filter((l) => l.short)
   const totalQty = form.lines.reduce((a, l) => a + (Number(l.quantity) || 0), 0)
-  const prod = (pid) => products.find((p) => p.id === Number(pid))
+  const prod = (pid) => cache[Number(pid)]
   const partyList = parties.data || []
   const selectedParty = partyList.find((p) => p.id === Number(form.party_id)) || (op?.party && op.party.id === Number(form.party_id) ? op.party : null)
 
   const setLine = (i, patch) => setForm({ ...form, lines: form.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) })
-  const pickProduct = (i, pid) => {
-    const p = prod(pid)
+  const pickProduct = (i, p) => {
+    remember([p])
     // receipts are bought at the purchase price, everything else is priced at the sales price
-    setLine(i, { product_id: pid, unit_price: p ? (t === 'IN' ? p.cost_price || p.unit_cost : p.unit_cost) : '' })
+    setLine(i, { product_id: p.id, label: p.label, unit_price: t === 'IN' ? p.cost_price || p.unit_cost : p.unit_cost })
   }
   const pickParty = (e) => {
     const p = partyList.find((x) => x.id === Number(e.target.value))
@@ -186,6 +203,7 @@ export default function OperationDetail({ user }) {
     schedule_date: form.schedule_date,
     source_location_id: form.source_location_id ? Number(form.source_location_id) : null,
     dest_location_id: form.dest_location_id ? Number(form.dest_location_id) : null,
+    version: isNew ? undefined : op?.version,
     lines: form.lines.filter((l) => l.product_id).map((l) => ({
       product_id: Number(l.product_id),
       quantity: Number(l.quantity),
@@ -204,17 +222,21 @@ export default function OperationDetail({ user }) {
   }
   const guard = (fn) => async () => {
     setBusy(true)
-    try { await fn() } catch (e) { notify(e.message, 'error') }
+    try { await fn() } catch (e) {
+      if (CONFLICT.test(e.message)) setConflict(true)
+      notify(e.message, 'error')
+    }
     setBusy(false)
   }
   const UNSAVED = 'You have unsaved changes. Save them first (the order returns to Draft), or reload to discard.'
+  const call = (target, action, body) => api(`/operations/${target.id}/${action}?version=${target.version}`, { method: 'POST', body })
   /** Run a workflow action. Drafts are saved first; later states must not be re-saved
    *  (saving sends the document back to Draft), so unsaved edits have to be dealt with first. */
   const act = (action) => guard(async () => {
     let target = op
-    if (isNew || status === 'draft') target = await save()
+    if (isNew || (status === 'draft' && canEdit)) target = await save()
     else if (dirty) throw new Error(UNSAVED)
-    const o = await api(`/operations/${target.id}/${action}`, { method: 'POST' })
+    const o = await call(target, action)
     hydrate(o)
     if (o.message) notify(o.message, o.status === 'waiting' ? 'error' : 'info')
     else if (action === 'validate') notify(`${cfg.single} validated — stock updated`, 'ok')
@@ -223,13 +245,13 @@ export default function OperationDetail({ user }) {
   })
   const validatePartial = (body) => guard(async () => {
     if (dirty) throw new Error(UNSAVED)
-    const o = await api(`/operations/${op.id}/validate`, { method: 'POST', body })
+    const o = await call(op, 'validate', body)
     hydrate(o)
     setPartialOpen(false)
     notify(o.message || `${cfg.single} validated — stock updated`, o.message ? 'info' : 'ok')
   })()
   const duplicate = guard(async () => {
-    const o = await api(`/operations/${id}/duplicate`, { method: 'POST' })
+    const o = await call(op, 'duplicate')
     nav(`/operations/${kind}/${o.id}`)
     notify(`Copied to ${o.reference} as a draft`, 'ok')
   })
@@ -252,7 +274,7 @@ export default function OperationDetail({ user }) {
   const isDelivery = t === 'OUT'
   const canPartial = status === 'ready' && op?.lines.length > 0 && (t === 'IN' || (isDelivery && op?.packed))
   const primary =
-    status === 'draft' ? <button className="btn primary" disabled={busy} onClick={act('todo')}><Icon name="check" size={16} />To do</button>
+    status === 'draft' && (!isNew || canEdit) ? <button className="btn primary" disabled={busy} onClick={act('todo')}><Icon name="check" size={16} />To do</button>
     : status === 'waiting' ? <button className="btn" disabled={busy} onClick={act('check')}><Icon name="refresh" size={16} />Check availability</button>
     : status === 'ready' && isDelivery && !op?.picked ? <button className="btn primary" disabled={busy} onClick={act('pick')}><Icon name="box" size={16} />Mark picked</button>
     : status === 'ready' && isDelivery && !op?.packed ? <button className="btn primary" disabled={busy} onClick={act('pack')}><Icon name="box" size={16} />Mark packed</button>
@@ -270,11 +292,19 @@ export default function OperationDetail({ user }) {
             {primary}
             {canPartial && <button className="btn" disabled={busy} onClick={() => setPartialOpen(true)}>Validate partially…</button>}
             {editable && <button className={`btn ${dirty ? 'primary' : ''}`} disabled={busy} onClick={guard(async () => { await save(); notify('Saved', 'ok') })}>Save</button>}
-            {!isNew && priced && <button className="btn ghost" disabled={busy} onClick={duplicate}>Duplicate</button>}
-            {!isNew && ['draft', 'waiting', 'ready'].includes(status) && <button className="btn danger" disabled={busy} onClick={act('cancel')}>Cancel</button>}
+            {!isNew && priced && canEdit && <button className="btn ghost" disabled={busy} onClick={duplicate}>Duplicate</button>}
+            {!isNew && canEdit && ['draft', 'waiting', 'ready'].includes(status) && <button className="btn danger" disabled={busy} onClick={act('cancel')}>Cancel</button>}
           </div>
         }
       />
+
+      {conflict && (
+        <div className="banner" role="alert">
+          <Icon name="alert" size={18} />
+          <div style={{ flex: 1 }}><b>Someone else changed this {cfg.single.toLowerCase()}</b>Your screen was out of date, so nothing was overwritten.</div>
+          <button className="btn sm" onClick={reloadDoc}><Icon name="refresh" size={14} />Reload</button>
+        </div>
+      )}
 
       <div className="print-head">
         <div><b>StockSense</b><span>Inventory document</span></div>
@@ -289,6 +319,12 @@ export default function OperationDetail({ user }) {
         </div>
       )}
 
+      {open && !canEdit && !isNew && (
+        <div className="hint-box no-print" style={{ marginBottom: 16 }}>
+          <Icon name="user" size={16} />
+          <span>You can move this {cfg.single.toLowerCase()} through its stages, but only a manager can change what's on it.</span>
+        </div>
+      )}
       {dirty && status !== 'draft' && (
         <div className="hint-box no-print" style={{ marginBottom: 16 }}>
           <Icon name="alert" size={16} />
@@ -382,15 +418,12 @@ export default function OperationDetail({ user }) {
                 const bad = !editable ? false : ln?.short && op.lines.length === form.lines.length
                 const p = prod(l.product_id)
                 const taxName = editable ? p?.tax?.name : ln?.tax_name
-                const sub = (Number(l.quantity) || 0) * (Number(l.unit_price) || 0)
+                const sub = r2((Number(l.quantity) || 0) * (Number(l.unit_price) || 0))
                 return (
                   <tr key={i} className={bad ? 'short' : ''}>
                     <td>
                       {editable ? (
-                        <select value={l.product_id} onChange={(e) => pickProduct(i, e.target.value)}>
-                          <option value="">Select product</option>
-                          {products.map((pp) => <option key={pp.id} value={pp.id}>{pp.label}</option>)}
-                        </select>
+                        <ProductPicker label={l.label} onPick={(pp) => pickProduct(i, pp)} />
                       ) : <span className="strong">{ln?.product}</span>}
                       {bad && <div className="line-warn"><Icon name="alert" size={13} />Short by {num(ln.missing)} — not in stock</div>}
                     </td>
@@ -418,12 +451,14 @@ export default function OperationDetail({ user }) {
         </div>
         <div className="table-foot">
           {editable
-            ? <button className="btn sm no-print" onClick={() => setForm({ ...form, lines: [...form.lines, { product_id: '', quantity: 1, unit_price: '' }] })}><Icon name="plus" size={15} />New product line</button>
+            ? <button className="btn sm no-print" onClick={() => setForm({ ...form, lines: [...form.lines, { product_id: '', label: '', quantity: 1, unit_price: '' }] })}><Icon name="plus" size={15} />New product line</button>
             : <span />}
           <span className="muted">Total quantity <b style={{ color: 'var(--text)', marginLeft: 6 }}>{num(totalQty)}</b></span>
         </div>
         {priced && <Totals lines={totalsLines} />}
       </div>
+
+      {!isNew && op && <History path={`/operations/${op.id}/history`} refreshKey={op.version} />}
 
       {partialOpen && op && (
         <ValidateModal op={op} verb={t === 'IN' ? 'received' : 'shipped'} busy={busy} onClose={() => setPartialOpen(false)} onConfirm={validatePartial} />

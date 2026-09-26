@@ -56,12 +56,18 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 
 | File | Responsibility |
 |---|---|
-| `main.py` | Creates the app, CORS, mounts routers under `/api`. On startup: `create_all` → column migrations → seed. |
+| `main.py` | Creates the app, CORS (from `CORS_ORIGINS`), mounts routers under `/api`, `/health` with a database check. On startup: secure-config check → `create_all` → `run_migrations` → seed. |
+| `migrations.py` | Idempotent upgrades: add columns, convert float columns to `NUMERIC`, create indexes, add the non-negative stock check. |
+| `pagination.py` | `PageParams` dependency and the `{items, total, page, page_size, pages}` envelope. |
+| `queries.py` | Set-based helpers: stock per product, reservations, incoming receipts, best-known cost. |
+| `audit.py` | `AuditLog` model, `record()`, `diff()`, `history()`. |
+| `conflict.py` | `check_version()` / `bump()` for optimistic locking. |
+| `ratelimit.py` | In-process sliding-window limiter used by the auth endpoints. |
 | `config.py` | Typed settings loaded from the environment. |
 | `db.py` | SQLAlchemy engine, `SessionLocal`, `get_db` dependency. |
 | `models.py` | All tables (see below). |
 | `security.py` | Password hashing, password-strength rules, JWT create/decode. |
-| `deps.py` | `current_user` dependency; returns 401 for missing/invalid tokens. |
+| `deps.py` | `current_user` (401 for missing, invalid or deactivated), role ranks and the `manager` / `admin` dependencies (403), `ensure_can_edit_docs()`. |
 | `mail.py` | `send_email()` via Brevo (returns False when unconfigured or rejected) and `send_otp()`, which prints the code instead when sending fails so development never blocks. |
 | `stock.py` | **The stock engine**: references, on-hand, reservations, availability, workflow actions (todo/check/pick/pack/validate/cancel), adjustments. |
 | `pricing.py` | Tax resolution for products/lines, default line prices (purchase cost for receipts, sales price otherwise) and document totals with per-tax breakdown. |
@@ -70,7 +76,8 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 | `lifecycle.py` | Usage checks (stock on hand, open documents, history) that decide whether a product, location or warehouse can be archived or deleted. |
 | `seed.py` | Virtual locations, GST slabs, first-run demo warehouse and products; back-fills older rows. Idempotent. |
 | `demo.py` | `python -m app.demo [--reset]`: builds the presentation dataset (see [DEMO.md](../DEMO.md)). |
-| `routers/auth.py` | Sign-up, login, profile, OTP reset. |
+| `routers/auth.py` | Sign-up (first user = admin), login, profile, OTP reset. Rate-limited; OTP mail sent as a background task. |
+| `routers/users.py` | User administration (`/users`) and the activity log (`/audit`). |
 | `routers/settings.py` | Warehouses, locations, taxes, per-category default tax. |
 | `routers/products.py` | Categories and products. |
 | `routers/operations.py` | Receipts, deliveries, transfers, workflow actions, contacts, move history. |
@@ -86,7 +93,8 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `users` | `login_id` (unique, 6–12), `email` (unique), `password_hash`, `low_stock_digest` | |
+| `users` | `login_id` (unique, 6–12), `email` (unique), `password_hash`, `role` (`staff`/`manager`/`admin`), `active`, `low_stock_digest` | Deactivated users' tokens stop working immediately |
+| `audit_log` | `at`, `user_id`, `user_login`, `action`, `entity`, `entity_id`, `label`, `changes` (JSON), `detail` | Indexed on `at`, user and `(entity, entity_id)` |
 | `parties` | `name` (unique), `kind` (`vendor`/`customer`/`both`), `gstin`, `email`, `phone`, `address`, `active` | Suppliers and customers |
 | `app_settings` | `key`, `value` | Tiny key/value store (e.g. the day the digest was last sent) |
 | `otp_codes` | `email`, `code_hash`, `expires_at`, `attempts`, `used` | 10-minute expiry, 5 attempts |
@@ -201,12 +209,24 @@ was by product, only that product's rows are shown.
 
 All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 404, 409 (conflict/state) or 422 (validation).
 
+### Conventions
+- **Pagination.** List endpoints (`/products`, `/stock`, `/operations`, `/moves`, `/parties`, `/reports/valuation`, `/reports/margin`,
+  `/reorder/suggestions`) accept `?page=1&page_size=25` (1-based, max 200). With `page` they answer
+  `{items, total, page, page_size, pages}` (reports keep their `totals` and `by_category` and also return `rows`); without it they return the plain list.
+  `/users` and `/audit` are always paged.
+- **Optimistic locking.** `products`, `parties` and `operations` return a `version`. Send it back as `version` in the `PUT` body (or
+  `?version=` on a workflow action). If the record changed meanwhile the answer is `409` with *"This record was changed by someone else
+  while you were editing it…"*. Omitting it skips the check (scripts). The version bumps on real edits and on every workflow step,
+  including automatic Waiting → Ready promotions.
+- **Permissions.** `401` = not signed in (or deactivated), `403` = signed in but the role is too low. See the table in the root README.
+- **Errors.** `{"detail": "message"}`; validation errors from bad input are `422`, and `429` (with `Retry-After`) means rate-limited.
+
 ### Auth
 | Method | Path | Body / notes |
 |---|---|---|
 | POST | `/auth/signup` | `login_id`, `email`, `password`, `confirm_password` → `{token, user}` |
 | POST | `/auth/login` | `login_id`, `password` → `{token, user}`. Wrong credentials: 401 `Invalid Login Id or Password` |
-| GET | `/auth/me` | Current user |
+| GET | `/auth/me` | Current user, including `role` |
 | POST | `/auth/forgot-password` | `email`. Always answers the same message. Sends the OTP if the account exists |
 | POST | `/auth/reset-password` | `email`, `otp`, `new_password`, `confirm_password` |
 | PUT | `/auth/me` | `email`. 409 if already used |
@@ -245,6 +265,7 @@ All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 
 | POST | `/operations` | `type` (IN/OUT/INT), `contact`, `schedule_date`, `warehouse_id`, `source_location_id`, `dest_location_id`, `lines[{product_id, quantity, unit_price?}]` |
 | GET | `/operations/{id}` | Full document with lines, shortages, totals and tax breakdown |
 | PUT | `/operations/{id}` | Same body as create; only while not done/cancelled |
+| GET | `/operations/{id}/history` | Audit entries for this document, newest first |
 | POST | `/operations/{id}/todo` | draft → ready (or waiting) |
 | POST | `/operations/{id}/check` | waiting → ready if stock allows |
 | POST | `/operations/{id}/pick`, `/pack` | Deliveries in Ready. Must pick before packing |
@@ -253,6 +274,13 @@ All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 
 | POST | `/operations/{id}/duplicate` | New draft copy at current prices |
 | GET | `/contacts` | `?type=` previously used contacts |
 | GET | `/moves` | Ledger rows. `?q=` `?status=` `?direction=in\|out\|transfer` `?type=` `?warehouse_id=` `?location_id=` `?category_id=` |
+
+### Users and activity
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/users` | **admin.** Paged list of users with role and status |
+| PUT | `/users/{id}` | **admin.** `{role, active}`. 409 if it would leave no active administrator |
+| GET | `/audit` | **manager.** Paged, newest first. `?q=` `?entity=` `?entity_id=` `?action=` `?user=` |
 
 ### Contacts
 | Method | Path | Notes |
@@ -323,9 +351,9 @@ docker compose exec db psql -U stocksense -d stocksense
 
 **Schema changes.** Adding a *table*: add the model; `create_all` creates it on next start.
 Adding a *column to an existing table*: add it to the model **and** append an idempotent statement to
-`MIGRATIONS` in `main.py`, for example
-`ALTER TABLE products ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION`.
-If you outgrow this, adopt Alembic.
+`COLUMNS` in `app/migrations.py`, for example
+`ALTER TABLE products ADD COLUMN IF NOT EXISTS weight NUMERIC(14,3)`. New foreign keys and hot filter columns should also
+be added to `INDEXES` there (and get `index=True` on the model). If you outgrow this, adopt Alembic.
 
 **Adding an endpoint.** Put it in the matching router, depend on `current_user` for auth, keep business rules in
 `stock.py` / `pricing.py` rather than in the route, and reuse `op_filters()` for anything that lists operations.
@@ -333,7 +361,12 @@ If you outgrow this, adopt Alembic.
 **Conventions**
 - Routes stay thin; state changes go through `stock.py` so every entry point follows the same rules.
 - Raise `HTTPException` with a clear human message: the UI shows `detail` verbatim.
-- Money and quantities are floats rounded to 2 decimals for amounts. Fine for a hackathon; use `Numeric`/`Decimal` in production.
+- Money is `NUMERIC(14,4)`, quantities `NUMERIC(14,3)`, tax rates `NUMERIC(7,3)`; they read back as floats but all totals are computed in
+  `Decimal` and rounded half-up to 2 places (`pricing.py`).
+- Every mutating route records an audit entry with `audit.record()` *before* `db.commit()`; a failed request therefore leaves none.
+- Anything that lists rows should accept `PageParams`, filter and slice in SQL, and load related rows with one query per page
+  (`joinedload` / `selectinload` / the helpers in `queries.py`), never one query per row.
+- Editable records carry a `version`; call `check_version()` on the way in and `bump()` when a real change is saved.
 
 ## Tests
 
@@ -341,7 +374,7 @@ If you outgrow this, adopt Alembic.
 docker compose exec backend python -m pytest tests -q
 ```
 
-The suite (`backend/tests/`, 113 tests) drives the real API through FastAPI's `TestClient` against a separate Postgres
+The suite (`backend/tests/`, 169 tests) drives the real API through FastAPI's `TestClient` against a separate Postgres
 database, `stocksense_test`, which is created on first run and rebuilt every run. Emails are captured instead of sent, and the developer's real Brevo key is blanked and guarded so a test can never send one.
 
 | File | Covers |
@@ -355,7 +388,13 @@ database, `stocksense_test`, which is created on first run and rebuilt every run
 | `test_parties.py` | contacts, GSTIN check digit, contact/document rules, history, archive and delete |
 | `test_valuation.py` | weighted-average cost, valuation and margin reports, purchase vs sales price defaults |
 | `test_digest.py` | preferences, digest content and escaping, once-a-day scheduling, opt-in only |
+| `test_pagination.py` | envelope, page walking equals the full list, filters, SQL move history, paged reports, dashboard consistency |
+| `test_roles_audit.py` | permission matrix for staff / manager / admin, user administration, last-admin guard, audit entries and history |
+| `test_hardening.py` | optimistic locking, negative-stock race (real threads), exact money, input limits, rate limits, secure defaults, migrations |
 
 `tests/helpers.py` has small builders (`product`, `make_op`, `receive`, `ship`, `warehouse`) to keep new tests short.
 
-**Not yet covered:** rate limiting, roles/permissions, audit of who edited what, Alembic migrations, server-side pagination, exact decimal money, UI tests.
+`tests/bench_scale.py` (not collected by pytest) builds an 8,000-product / 30,000-document dataset in its own database and times the
+heavy endpoints; `tests/run_bench.sh` runs each in its own process with a 60 s cap. See the table in the root README.
+
+**Not yet covered:** Alembic migrations, trigram search indexes, a shared (Redis) rate limiter, HttpOnly-cookie sessions, UI tests.

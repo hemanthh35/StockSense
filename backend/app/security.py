@@ -35,6 +35,8 @@ def decode_token(token: str) -> int | None:
 def password_problem(pw: str) -> str | None:
     if len(pw) <= 8:
         return "Password must be more than 8 characters"
+    if len(pw.encode()) > 72:
+        return "Password is too long (72 characters at most)"
     if not re.search(r"[a-z]", pw):
         return "Password must contain a lowercase letter"
     if not re.search(r"[A-Z]", pw):

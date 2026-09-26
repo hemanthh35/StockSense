@@ -8,13 +8,15 @@ a realistic mix of receipts, deliveries, transfers and adjustments in every stat
 click-through script. Users and taxes are never deleted.
 """
 import argparse
+import json
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import delete, select
 
 from . import pricing, stock
 from .db import SessionLocal, engine
-from .main import MIGRATIONS
+from .audit import AuditLog
+from .migrations import run_migrations
 from .models import (
     Base, Category, Location, Operation, OperationLine, Party, Product, Sequence, StockQuant, Tax, User, Warehouse,
 )
@@ -68,7 +70,7 @@ PRODUCTS = [
 
 
 def reset(db) -> None:
-    for model in (OperationLine, Operation, StockQuant, Sequence, Product, Category, Party):
+    for model in (AuditLog, OperationLine, Operation, StockQuant, Sequence, Product, Category, Party):
         db.execute(delete(model))
     db.execute(delete(Location).where(Location.warehouse_id.isnot(None)))
     db.execute(delete(Warehouse))
@@ -79,13 +81,24 @@ def build(db) -> dict:
     seed_virtual_locations(db)
     seed_taxes(db)
 
-    user = db.scalar(select(User).where(User.login_id == DEMO_LOGIN))
-    if not user:
-        user = User(login_id=DEMO_LOGIN, email=DEMO_EMAIL, password_hash=hash_secret(DEMO_PASSWORD))
-        db.add(user)
-        db.flush()
-    else:
-        user.email = DEMO_EMAIL  # keep it a valid, reachable-looking address
+    def ensure_user(login: str, role: str, email: str) -> User:
+        u = db.scalar(select(User).where(User.login_id == login))
+        if not u:
+            u = User(login_id=login, email=email, password_hash=hash_secret(DEMO_PASSWORD))
+            db.add(u)
+            db.flush()
+        u.role, u.email, u.active = role, email, True  # keep the demo people valid, active and correctly ranked
+        return u
+
+    user = ensure_user(DEMO_LOGIN, "admin", DEMO_EMAIL)
+    mgr = ensure_user("demo_manager", "manager", "manager@example.com")
+    staff = ensure_user("demo_staff", "staff", "staff@example.com")
+
+    def note(actor, action, entity, entity_id, label, at, detail=None, changes=None):
+        """The demo builds data through the service layer, so write the activity log entries the API would have."""
+        at = min(at, datetime.utcnow() - timedelta(minutes=30))  # history can't be in the future
+        db.add(AuditLog(at=at, user_id=actor.id, user_login=actor.login_id, action=action, entity=entity, entity_id=entity_id,
+                        label=label, detail=detail, changes=json.dumps(changes) if changes else None))
 
     taxes = {t.name: t for t in db.scalars(select(Tax))}
     today = date.today()
@@ -95,6 +108,8 @@ def build(db) -> dict:
     nd = Warehouse(name="North Depot", short_code="ND", address="Sachin Industrial Area, Surat")
     db.add_all([wh, nd])
     db.flush()
+    for w in (wh, nd):
+        note(user, "create", "warehouse", w.id, f"{w.short_code} · {w.name}", datetime.combine(today - timedelta(days=35), time(9, 0)))
     L = {}
     for key, w, name, code in [("WH/S1", wh, "Stock1", "Stock1"), ("WH/S2", wh, "Stock2", "Stock2"), ("WH/DISP", wh, "Dispatch", "Dispatch"),
                                ("ND/A", nd, "Rack A", "RackA"), ("ND/B", nd, "Rack B", "RackB")]:
@@ -109,7 +124,8 @@ def build(db) -> dict:
         parties[name] = Party(name=name, kind=kind, gstin=first14 + gstin_check_char(first14), phone=phone, address=address,
                               email=f"accounts@{name.lower().replace(' ', '').replace('pvtltd', '')}.example.com")
         db.add(parties[name])
-    db.flush()
+        db.flush()
+        note(mgr, "create", "contact", parties[name].id, name, datetime.combine(today - timedelta(days=33), time(10, 0)))
 
     cats = {}
     for name, rate in CATEGORIES.items():
@@ -126,6 +142,7 @@ def build(db) -> dict:
         db.add(p)
         db.flush()
         P[sku] = p
+        note(mgr, "create", "product", p.id, f"{p.sku} · {p.name}", datetime.combine(today - timedelta(days=31), time(9, 0)))
         if opening:
             op = stock.adjust(db, p, L[loc], opening, user.id)
             op.contact = "Opening stock"
@@ -133,31 +150,49 @@ def build(db) -> dict:
             op.done_at = datetime.combine(today - timedelta(days=30), time(9, 0))
     db.flush()
 
+    note(mgr, "update", "product", P["CHAIR001"].id, "CHAIR001 · Office Chair", datetime.combine(today - timedelta(days=20), time(15, 0)),
+         changes={"unit_cost": [4000, 4200], "reorder_min": [5, 8]})
+    note(user, "update", "tax", taxes["GST 18%"].id, "GST 18%", datetime.combine(today - timedelta(days=25), time(11, 0)),
+         changes={"is_default": [False, True]})
+    note(user, "role", "user", mgr.id, mgr.login_id, datetime.combine(today - timedelta(days=36), time(9, 30)), changes={"role": ["staff", "manager"]})
+
     # ---- documents
     def make(kind, lines, contact, days, *, state="done", warehouse=None, src=None, dst=None, partial=None):
+        actor = staff if kind == "INT" else mgr  # managers prepare receipts and deliveries; staff run transfers
         w, s, d = _resolve_locations(db, kind, warehouse.id if warehouse else None, L[src].id if src else None, L[dst].id if dst else None)
         when = today + timedelta(days=days)
         party = parties.get(contact) if kind in ("IN", "OUT") else None
         op = Operation(reference=stock.next_reference(db, w, kind), type=kind, status="draft", contact=contact, schedule_date=when,
-                       responsible_id=user.id, warehouse_id=w.id, source_location_id=s.id, dest_location_id=d.id,
+                       responsible_id=actor.id, warehouse_id=w.id, source_location_id=s.id, dest_location_id=d.id,
                        party_id=party.id if party else None)
         # a line is (sku, qty) or (sku, qty, unit_price) when the price paid differs from the default
         op.lines = _make_lines(db, [LineIn(product_id=P[l[0]].id, quantity=l[1], unit_price=l[2] if len(l) > 2 else None) for l in lines], kind)
         db.add(op)
         db.flush()
+        t0 = datetime.combine(when - timedelta(days=2), time(9, 30))
+        note(actor, "create", "operation", op.id, op.reference, t0, detail=f"{len(op.lines)} line{'s' if len(op.lines) != 1 else ''}")
         if state in ("ready", "picked", "waiting", "done"):
-            stock.action_todo(db, op)
+            msg = stock.action_todo(db, op)
             assert op.status == ("waiting" if state == "waiting" else "ready"), f"{op.reference}: {op.status} not {state}"
+            note(actor, "todo", "operation", op.id, op.reference, t0 + timedelta(hours=1), detail=msg or "now ready")
         if state == "picked":
             stock.action_pick(db, op)
+            note(staff, "pick", "operation", op.id, op.reference, datetime.combine(when, time(10, 0)), detail="now ready")
         if state == "done":
             if kind == "OUT":
                 stock.action_pick(db, op)
                 stock.action_pack(db, op)
-            stock.action_validate(db, op, {op.lines[i].id: q for i, q in (partial or {}).items()} or None)
+                note(staff, "pick", "operation", op.id, op.reference, datetime.combine(when, time(10, 0)), detail="now ready")
+                note(staff, "pack", "operation", op.id, op.reference, datetime.combine(when, time(10, 30)), detail="now ready")
+            msg = stock.action_validate(db, op, {op.lines[i].id: q for i, q in (partial or {}).items()} or None)
             op.done_at = datetime.combine(when, time(11, 30))
+            note(staff if kind == "OUT" else actor, "validate", "operation", op.id, op.reference, op.done_at, detail=msg or "now done")
+            bo = db.scalar(select(Operation).where(Operation.backorder_of_id == op.id))
+            if bo:
+                note(actor, "create", "operation", bo.id, bo.reference, op.done_at, detail=f"backorder of {op.reference}")
         if state == "cancelled":
             stock.action_cancel(db, op)
+            note(actor, "cancel", "operation", op.id, op.reference, t0 + timedelta(days=1), detail="now cancelled")
         db.flush()
         return op
 
@@ -200,10 +235,7 @@ def main() -> None:
     args = ap.parse_args()
 
     Base.metadata.create_all(engine)
-    from sqlalchemy import text
-    with engine.begin() as conn:
-        for stmt in MIGRATIONS:
-            conn.execute(text(stmt))
+    run_migrations(engine)
 
     with SessionLocal() as db:
         if args.reset:

@@ -4,6 +4,7 @@ import { useApi } from '../hooks'
 import { Icon } from '../components/icons.jsx'
 import { Field, PageHeader, Toast, useToast } from '../components/ui.jsx'
 import { Rules } from './Auth.jsx'
+import { ROLE_LABEL } from '../perm.js'
 
 function Pw({ value, onChange, autoComplete }) {
   const [show, setShow] = useState(false)
@@ -64,7 +65,7 @@ export default function Profile({ user, onUserChange }) {
         <div className="card">
           <div className="profile">
             <span className="avatar lg">{user.login_id[0].toUpperCase()}</span>
-            <div><h3 style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em' }}>{user.login_id}</h3><p className="muted">{user.email}</p></div>
+            <div><h3 style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em' }}>{user.login_id}</h3><p className="muted">{user.email}</p><span className="role-pill" style={{ marginTop: 8 }}>{ROLE_LABEL[user.role]}</span></div>
           </div>
           <form className="card-pad" onSubmit={saveEmail} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <Field label="Login ID" hint="Your login ID can't be changed"><input disabled value={user.login_id} /></Field>
