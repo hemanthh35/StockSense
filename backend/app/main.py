@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import SessionLocal, engine
@@ -9,9 +10,23 @@ from .routers import auth, inventory, operations, products, settings
 from .seed import seed
 
 
+# create_all() only creates missing tables, so new columns on existing tables are added here.
+MIGRATIONS = [
+    "ALTER TABLE categories ADD COLUMN IF NOT EXISTS default_tax_id INTEGER REFERENCES taxes(id)",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_id INTEGER REFERENCES taxes(id)",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS hsn_code VARCHAR(20)",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS unit_price DOUBLE PRECISION DEFAULT 0",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS tax_rate DOUBLE PRECISION DEFAULT 0",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS tax_name VARCHAR(60)",
+]
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for stmt in MIGRATIONS:
+            conn.execute(text(stmt))
     with SessionLocal() as db:
         seed(db)
     yield

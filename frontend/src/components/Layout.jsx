@@ -50,6 +50,7 @@ export default function Layout({ user, onLogout }) {
             <Menu trigger={(open, toggle) => <GroupTrigger label="Settings" active={pathname.startsWith('/settings')} open={open} toggle={toggle} />}>
               <MenuItem to="/settings/warehouses" icon="warehouse" title="Warehouse" desc="Names, codes and addresses" />
               <MenuItem to="/settings/locations" icon="pin" title="Locations" desc="Racks, rooms and stock areas" />
+              <MenuItem to="/settings/taxes" icon="tag" title="Taxes" desc="GST slabs and category defaults" />
             </Menu>
           </nav>
 

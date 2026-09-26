@@ -3,9 +3,9 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .. import stock
+from .. import pricing, stock
 from ..db import get_db
 from ..deps import current_user
 from ..models import Location, Operation, OperationLine, Product, User, Warehouse
@@ -18,6 +18,7 @@ TYPES = {"IN": "Receipt", "OUT": "Delivery", "INT": "Internal Transfer", "ADJ": 
 class LineIn(BaseModel):
     product_id: int
     quantity: float
+    unit_price: float | None = None  # blank = product's unit cost
 
 
 class OperationIn(BaseModel):
@@ -63,6 +64,7 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
         "dest_location": loc_brief(op.dest_location),
         "direction": direction_of(op),
     }
+    data.update(pricing.op_totals(op))
     if with_lines:
         data["lines"] = [
             {
@@ -70,6 +72,11 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
                 "product_id": ln.product_id,
                 "product": f"[{ln.product.sku}] {ln.product.name}",
                 "quantity": ln.quantity,
+                "unit_price": ln.unit_price or 0,
+                "tax_rate": ln.tax_rate or 0,
+                "tax_name": ln.tax_name,
+                "subtotal": pricing.line_amounts(ln)[0],
+                "tax_amount": pricing.line_amounts(ln)[1],
                 "short": ln.id in short,
                 "missing": short.get(ln.id, 0),
             }
@@ -115,6 +122,25 @@ def _validate_lines(db: Session, lines: list[LineIn]) -> None:
             raise HTTPException(422, "Unknown product")
 
 
+def _make_lines(db: Session, lines: list[LineIn]) -> list[OperationLine]:
+    out = []
+    for l in lines:
+        product = db.get(Product, l.product_id)
+        ln = OperationLine(product_id=product.id, quantity=l.quantity)
+        pricing.fill_line(ln, product, l.unit_price)
+        out.append(ln)
+    return out
+
+
+@router.get("/contacts")
+def contacts(type: str | None = None, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    """Previously used contacts, so they can be picked instead of retyped."""
+    stmt = select(Operation.contact).where(Operation.contact.isnot(None), Operation.contact != "Inventory Adjustment").distinct()
+    if type:
+        stmt = stmt.where(Operation.type == type)
+    return sorted(c for c in db.scalars(stmt) if c.strip())
+
+
 @router.get("/operations")
 def list_operations(
     type: str | None = None,
@@ -124,7 +150,7 @@ def list_operations(
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
-    stmt = select(Operation).order_by(Operation.id.desc())
+    stmt = select(Operation).options(selectinload(Operation.lines)).order_by(Operation.id.desc())
     if type:
         stmt = stmt.where(Operation.type == type)
     if status:
@@ -157,7 +183,7 @@ def create_operation(body: OperationIn, db: Session = Depends(get_db), user: Use
         source_location_id=src,
         dest_location_id=dst,
     )
-    op.lines = [OperationLine(product_id=l.product_id, quantity=l.quantity) for l in body.lines]
+    op.lines = _make_lines(db, body.lines)
     db.add(op)
     db.commit()
     return op_out(db, _load(db, op.id))
@@ -181,7 +207,7 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
         op.source_location_id = body.source_location_id
     if body.dest_location_id:
         op.dest_location_id = body.dest_location_id
-    op.lines = [OperationLine(product_id=l.product_id, quantity=l.quantity) for l in body.lines]
+    op.lines = _make_lines(db, body.lines)
     if op.status != "draft":  # edits invalidate the earlier availability check
         op.status = "draft"
     db.commit()
@@ -189,9 +215,21 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
 
 
 @router.post("/operations/{op_id}/{action}")
-def operation_action(op_id: int, action: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
+def operation_action(op_id: int, action: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     op = _load(db, op_id)
     message = None
+    if action == "duplicate":
+        if op.type == "ADJ":
+            raise HTTPException(409, "Adjustments cannot be duplicated")
+        copy = Operation(
+            reference=stock.next_reference(db, op.warehouse, op.type), type=op.type, status="draft", contact=op.contact,
+            schedule_date=date.today(), responsible_id=user.id, warehouse_id=op.warehouse_id,
+            source_location_id=op.source_location_id, dest_location_id=op.dest_location_id,
+        )
+        copy.lines = _make_lines(db, [LineIn(product_id=l.product_id, quantity=l.quantity) for l in op.lines])
+        db.add(copy)
+        db.commit()
+        return op_out(db, _load(db, copy.id))
     try:
         if action == "todo":
             message = stock.action_todo(db, op)

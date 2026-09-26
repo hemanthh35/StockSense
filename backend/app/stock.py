@@ -157,7 +157,7 @@ def adjust(db: Session, product: Product, location: Location, counted: float, us
         dest_location_id=dst.id,
         done_at=datetime.utcnow(),
     )
-    op.lines.append(OperationLine(product_id=product.id, quantity=abs(delta)))
+    op.lines.append(OperationLine(product_id=product.id, quantity=abs(delta), unit_price=product.unit_cost))
     db.add(op)
     add_qty(db, product.id, location, delta)
     promote_waiting(db)

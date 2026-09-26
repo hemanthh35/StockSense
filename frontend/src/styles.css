@@ -336,6 +336,28 @@ tr.short td:first-child { box-shadow: inset 3px 0 0 var(--red); }
 .otp { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
 .otp input { height: 52px; text-align: center; font-family: var(--mono); font-size: 22px; padding: 0; }
 
+/* ============ taxes & totals ============ */
+.switch { position: relative; display: inline-block; vertical-align: middle; width: 38px; height: 22px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; cursor: pointer; height: 100%; width: 100%; margin: 0; z-index: 1; }
+.switch i { position: absolute; inset: 0; border-radius: 11px; background: #c9c2df; transition: background .15s; }
+.switch i::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(40, 30, 90, .3); transition: transform .15s; }
+.switch input:checked + i { background: var(--green); } .switch input:checked + i::after { transform: translateX(16px); }
+.switch input:focus-visible + i { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.toggle-row b { display: block; font-weight: 500; } .toggle-row small { color: var(--text-3); }
+.tax-tag { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 6px; background: var(--butter-bg); color: #7a5300; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.tax-tag.none { background: var(--surface-3); color: var(--text-3); }
+.default-pill { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 9px; border-radius: 11px; background: var(--accent-soft); color: var(--accent-strong); font-size: 12px; font-weight: 600; }
+.prefix { position: relative; } .prefix > span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-3); pointer-events: none; }
+.prefix input { padding-left: 26px; }
+.detail-table td.price input { max-width: 150px; }
+.totals { margin-left: auto; width: 100%; max-width: 380px; padding: 16px 22px 20px; display: flex; flex-direction: column; gap: 8px; }
+.totals .row { display: flex; justify-content: space-between; gap: 16px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.totals .row.sub { padding-left: 14px; font-size: 13px; color: var(--text-3); }
+.totals .row.grand { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text); font-size: 17px; font-weight: 600; }
+.seg-inline { display: flex; gap: 8px; }
+.hint-box { display: flex; gap: 10px; padding: 12px 14px; border-radius: 10px; background: var(--blue-bg); color: #1d4f88; font-size: 13.5px; }
+
 /* ============ responsive ============ */
 @media (max-width: 1000px) {
   .grid3 { grid-template-columns: 1fr; } .kpi-strip { grid-template-columns: repeat(3, 1fr); }

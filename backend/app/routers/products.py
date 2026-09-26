@@ -3,10 +3,10 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import stock
+from .. import pricing, stock
 from ..db import get_db
 from ..deps import current_user
-from ..models import Category, Location, Product, StockQuant, User
+from ..models import Category, Location, Product, StockQuant, Tax, User
 
 router = APIRouter(tags=["products"])
 
@@ -23,6 +23,8 @@ class ProductIn(BaseModel):
     unit_cost: float = 0
     reorder_min: float = 0
     reorder_qty: float = 0
+    hsn_code: str | None = None
+    tax_id: int | None = None  # None = auto (category default, then global default); 0 = no tax
     initial_stock: float = 0
     initial_location_id: int | None = None
 
@@ -47,14 +49,31 @@ def product_out(db: Session, p: Product, on_hand: float | None = None) -> dict:
         "unit_cost": p.unit_cost,
         "reorder_min": p.reorder_min,
         "reorder_qty": p.reorder_qty,
+        "hsn_code": p.hsn_code,
+        "tax_id": p.tax_id,
+        "tax": {"id": p.tax.id, "name": p.tax.name, "rate": p.tax.rate} if p.tax else None,
         "on_hand": on_hand,
         "low_stock": on_hand <= p.reorder_min,
     }
 
 
+def _resolve_tax_id(db: Session, body: ProductIn) -> int | None:
+    if body.tax_id == 0:
+        return None
+    if body.tax_id:
+        if not db.get(Tax, body.tax_id):
+            raise HTTPException(422, "Unknown tax")
+        return body.tax_id
+    auto = pricing.auto_tax(db, body.category_id)
+    return auto.id if auto else None
+
+
 @router.get("/categories")
 def list_categories(db: Session = Depends(get_db), _: User = Depends(current_user)):
-    return [{"id": c.id, "name": c.name} for c in db.scalars(select(Category).order_by(Category.name))]
+    return [
+        {"id": c.id, "name": c.name, "default_tax_id": c.default_tax_id}
+        for c in db.scalars(select(Category).order_by(Category.name))
+    ]
 
 
 @router.post("/categories", status_code=201)
@@ -67,7 +86,7 @@ def create_category(body: CategoryIn, db: Session = Depends(get_db), _: User = D
         c = Category(name=name)
         db.add(c)
         db.commit()
-    return {"id": c.id, "name": c.name}
+    return {"id": c.id, "name": c.name, "default_tax_id": c.default_tax_id}
 
 
 @router.get("/products")
@@ -96,6 +115,7 @@ def create_product(body: ProductIn, db: Session = Depends(get_db), user: User = 
     p = Product(
         name=body.name.strip(), sku=sku, category_id=body.category_id, uom=body.uom or "Unit",
         unit_cost=body.unit_cost, reorder_min=body.reorder_min, reorder_qty=body.reorder_qty,
+        hsn_code=(body.hsn_code or "").strip() or None, tax_id=_resolve_tax_id(db, body),
     )
     db.add(p)
     db.flush()
@@ -120,5 +140,7 @@ def update_product(pid: int, body: ProductIn, db: Session = Depends(get_db), _: 
         raise HTTPException(409, "SKU already exists")
     p.name, p.sku, p.category_id, p.uom = body.name.strip(), sku, body.category_id, body.uom
     p.unit_cost, p.reorder_min, p.reorder_qty = body.unit_cost, body.reorder_min, body.reorder_qty
+    p.hsn_code = (body.hsn_code or "").strip() or None
+    p.tax_id = _resolve_tax_id(db, body)
     db.commit()
     return product_out(db, p)

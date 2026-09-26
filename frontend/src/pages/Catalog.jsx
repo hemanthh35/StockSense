@@ -5,7 +5,7 @@ import { useApi, useDebounced } from '../hooks'
 import { Icon } from '../components/icons.jsx'
 import { Empty, Field, Modal, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
-const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
+const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
 
 export function Products() {
   const [params, setParams] = useSearchParams()
@@ -15,6 +15,7 @@ export function Products() {
   const { data, reload } = useApi('/products', { q: dq, category_id: cat })
   const cats = useApi('/categories')
   const locs = useApi('/locations', { internal_only: true }).data || []
+  const taxes = useApi('/taxes').data || []
   const [form, setForm] = useState(params.get('new') ? { ...emptyP } : null)
   const [newCat, setNewCat] = useState('')
   const [toast, notify, close] = useToast()
@@ -22,6 +23,8 @@ export function Products() {
   const pager = usePager(rows)
 
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value })
+  const catDefault = (cats.data || []).find((c) => c.id === Number(form?.category_id))?.default_tax_id
+  const autoTax = taxes.find((t) => t.id === catDefault) || taxes.find((t) => t.is_default)
   const closeForm = () => { setForm(null); if (params.get('new')) setParams({}) }
   const save = async (e) => {
     e.preventDefault()
@@ -29,6 +32,8 @@ export function Products() {
       const body = {
         ...form,
         category_id: form.category_id ? Number(form.category_id) : null,
+        tax_id: form.tax_id === '' ? null : Number(form.tax_id),
+        hsn_code: form.hsn_code || null,
         initial_location_id: form.initial_location_id ? Number(form.initial_location_id) : null,
         unit_cost: Number(form.unit_cost), reorder_min: Number(form.reorder_min),
         reorder_qty: Number(form.reorder_qty), initial_stock: Number(form.initial_stock),
@@ -61,14 +66,15 @@ export function Products() {
         </div>
         <div className="table-wrap">
           <table className="rows">
-            <thead><tr><th>Product</th><th>Category</th><th>UoM</th><th className="num">Unit cost</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
+            <thead><tr><th>Product</th><th>Category</th><th>UoM</th><th>Tax</th><th className="num">Unit cost</th><th className="num">On hand</th><th className="num">Reorder at</th></tr></thead>
             <tbody>
-              {!data && <TableSkeleton cols={6} />}
+              {!data && <TableSkeleton cols={7} />}
               {pager.slice.map((p) => (
-                <tr key={p.id} onClick={() => setForm({ ...p, category_id: p.category_id || '' })}>
+                <tr key={p.id} onClick={() => setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
                   <td className="strong">{p.name}<span className="sub mono">{p.sku}</span></td>
                   <td>{p.category ? <span className="tag">{p.category}</span> : <span className="dim">—</span>}</td>
                   <td className="muted">{p.uom}</td>
+                  <td>{p.tax ? <span className="tax-tag">{p.tax.name}</span> : <span className="tax-tag none">No tax</span>}</td>
                   <td className="num">{money(p.unit_cost)}</td>
                   <td className={`num ${p.on_hand <= 0 ? 'neg' : p.low_stock ? 'warn' : ''}`}>{num(p.on_hand)}</td>
                   <td className="num muted">{num(p.reorder_min)}</td>
@@ -101,7 +107,15 @@ export function Products() {
               <div className="inline"><input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="New category name" /><button type="button" className="btn" onClick={addCat}>Add</button></div>
             </Field>
             <Field label="Unit of measure"><input value={form.uom} onChange={set('uom')} /></Field>
-            <Field label="Unit cost (₹)"><input type="number" min="0" step="any" value={form.unit_cost} onChange={set('unit_cost')} /></Field>
+            <Field label="Unit price (₹)" hint="Pre-fills every order line"><div className="prefix"><span>₹</span><input type="number" min="0" step="any" value={form.unit_cost} onChange={set('unit_cost')} /></div></Field>
+            <Field label="Tax" hint="Applied automatically on receipts and deliveries">
+              <select value={form.tax_id} onChange={set('tax_id')}>
+                <option value="">Automatic — {autoTax ? autoTax.name : 'no tax'}</option>
+                <option value={0}>No tax</option>
+                {taxes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </Field>
+            <Field label="HSN / SAC code" hint="Optional"><input value={form.hsn_code} onChange={set('hsn_code')} className="mono" inputMode="numeric" /></Field>
             <Field label="Reorder when stock ≤"><input type="number" min="0" step="any" value={form.reorder_min} onChange={set('reorder_min')} /></Field>
             <Field label="Reorder quantity"><input type="number" min="0" step="any" value={form.reorder_qty} onChange={set('reorder_qty')} /></Field>
             {!form.id && (

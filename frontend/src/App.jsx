@@ -4,10 +4,12 @@ import { api, getToken, setToken } from './api'
 import Layout from './components/Layout.jsx'
 import { Forgot, Login, Signup } from './pages/Auth.jsx'
 import Dashboard from './pages/Dashboard.jsx'
-import { OperationDetail, OperationList } from './pages/Operations.jsx'
+import { OperationList } from './pages/Operations.jsx'
+import OperationDetail from './pages/OperationDetail.jsx'
 import { Products, Stock } from './pages/Catalog.jsx'
 import MoveHistory from './pages/MoveHistory.jsx'
 import { Locations, Profile, Warehouses } from './pages/Settings.jsx'
+import Taxes from './pages/Taxes.jsx'
 
 export default function App() {
   const [user, setUser] = useState(null)
@@ -44,6 +46,7 @@ export default function App() {
         <Route path="/moves" element={<MoveHistory />} />
         <Route path="/settings/warehouses" element={<Warehouses />} />
         <Route path="/settings/locations" element={<Locations />} />
+        <Route path="/settings/taxes" element={<Taxes />} />
         <Route path="/profile" element={<Profile user={user} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Icon } from './icons.jsx'
 
 export const STATUS_LABEL = { draft: 'Draft', waiting: 'Waiting', ready: 'Ready', done: 'Done', cancelled: 'Cancelled' }
-export const money = (n) => `₹${Number(n).toLocaleString('en-IN')}`
+export const money = (n) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 export const num = (n) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 3 })
 export const fmtDate = (s) => (s ? new Date(s + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—')
 

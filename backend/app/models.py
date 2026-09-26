@@ -54,10 +54,24 @@ class Location(Base):
         return self.name
 
 
+class Tax(Base):
+    """A reusable tax rate (GST slab, cess, ...). Rates are snapshotted onto document lines."""
+
+    __tablename__ = "taxes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(60), unique=True)
+    rate: Mapped[float] = mapped_column(Float, default=0)
+    kind: Mapped[str] = mapped_column(String(10), default="GST")  # GST | OTHER
+    active: Mapped[bool] = mapped_column(default=True)
+    is_default: Mapped[bool] = mapped_column(default=False)
+
+
 class Category(Base):
     __tablename__ = "categories"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
+    default_tax_id: Mapped[int | None] = mapped_column(ForeignKey("taxes.id"))
+    default_tax: Mapped[Tax | None] = relationship()
 
 
 class Product(Base):
@@ -71,6 +85,9 @@ class Product(Base):
     unit_cost: Mapped[float] = mapped_column(Float, default=0)
     reorder_min: Mapped[float] = mapped_column(Float, default=0)
     reorder_qty: Mapped[float] = mapped_column(Float, default=0)
+    hsn_code: Mapped[str | None] = mapped_column(String(20))
+    tax_id: Mapped[int | None] = mapped_column(ForeignKey("taxes.id"))
+    tax: Mapped[Tax | None] = relationship()
 
 
 class StockQuant(Base):
@@ -121,5 +138,8 @@ class OperationLine(Base):
     operation_id: Mapped[int] = mapped_column(ForeignKey("operations.id"))
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     quantity: Mapped[float] = mapped_column(Float)
+    unit_price: Mapped[float] = mapped_column(Float, default=0)
+    tax_rate: Mapped[float] = mapped_column(Float, default=0)
+    tax_name: Mapped[str | None] = mapped_column(String(60))
     operation: Mapped[Operation] = relationship(back_populates="lines")
     product: Mapped[Product] = relationship()
