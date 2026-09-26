@@ -1,0 +1,125 @@
+from datetime import date, datetime
+
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    login_id: Mapped[str] = mapped_column(String(12), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class OtpCode(Base):
+    __tablename__ = "otp_codes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    used: Mapped[bool] = mapped_column(default=False)
+
+
+class Warehouse(Base):
+    __tablename__ = "warehouses"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    short_code: Mapped[str] = mapped_column(String(10), unique=True)
+    address: Mapped[str | None] = mapped_column(String(255))
+    locations: Mapped[list["Location"]] = relationship(back_populates="warehouse")
+
+
+class Location(Base):
+    """type: internal (tracked stock) | vendor | customer | adjustment (virtual)."""
+
+    __tablename__ = "locations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    short_code: Mapped[str] = mapped_column(String(20))
+    type: Mapped[str] = mapped_column(String(15), default="internal")
+    warehouse_id: Mapped[int | None] = mapped_column(ForeignKey("warehouses.id"))
+    warehouse: Mapped[Warehouse | None] = relationship(back_populates="locations")
+
+    @property
+    def full_name(self) -> str:
+        if self.warehouse is not None:
+            return f"{self.warehouse.short_code}/{self.short_code}"
+        return self.name
+
+
+class Category(Base):
+    __tablename__ = "categories"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+
+
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150))
+    sku: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
+    category: Mapped[Category | None] = relationship()
+    uom: Mapped[str] = mapped_column(String(20), default="Unit")
+    unit_cost: Mapped[float] = mapped_column(Float, default=0)
+    reorder_min: Mapped[float] = mapped_column(Float, default=0)
+    reorder_qty: Mapped[float] = mapped_column(Float, default=0)
+
+
+class StockQuant(Base):
+    __tablename__ = "stock_quants"
+    __table_args__ = (UniqueConstraint("product_id", "location_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+
+
+class Sequence(Base):
+    __tablename__ = "sequences"
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Operation(Base):
+    """type: IN receipt | OUT delivery | INT internal transfer | ADJ adjustment.
+    status: draft | waiting | ready | done | cancelled."""
+
+    __tablename__ = "operations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reference: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    type: Mapped[str] = mapped_column(String(3), index=True)
+    status: Mapped[str] = mapped_column(String(10), default="draft", index=True)
+    contact: Mapped[str | None] = mapped_column(String(150))
+    schedule_date: Mapped[date] = mapped_column(Date, default=date.today)
+    responsible_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    source_location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    dest_location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    done_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    responsible: Mapped[User | None] = relationship()
+    warehouse: Mapped[Warehouse] = relationship()
+    source_location: Mapped[Location] = relationship(foreign_keys=[source_location_id])
+    dest_location: Mapped[Location] = relationship(foreign_keys=[dest_location_id])
+    lines: Mapped[list["OperationLine"]] = relationship(
+        back_populates="operation", cascade="all, delete-orphan", order_by="OperationLine.id"
+    )
+
+
+class OperationLine(Base):
+    __tablename__ = "operation_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("operations.id"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    quantity: Mapped[float] = mapped_column(Float)
+    operation: Mapped[Operation] = relationship(back_populates="lines")
+    product: Mapped[Product] = relationship()
