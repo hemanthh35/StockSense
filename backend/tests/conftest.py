@@ -21,6 +21,7 @@ def _prepare_database() -> None:
 os.environ["DIGEST_ENABLED"] = "false"  # no background e-mail loop while testing
 os.environ["BREVO_API_KEY"] = ""  # the developer's real key must never be used by tests
 os.environ["BREVO_SENDER_EMAIL"] = ""
+os.environ["GROQ_API_KEY"] = ""  # tests never talk to the real AI service
 os.environ["RATE_LIMIT_ENABLED"] = "false"  # dedicated tests switch it on when they need it
 _prepare_database()
 

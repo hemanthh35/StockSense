@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     brevo_api_key: str = ""
     brevo_sender_email: str = ""
     brevo_sender_name: str = "StockSense"
+    groq_api_key: str = ""  # enables the AI assistant (https://console.groq.com)
+    groq_model: str = "openai/gpt-oss-120b"  # or openai/gpt-oss-20b for faster, cheaper answers
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    assistant_rate_per_minute: int = 20  # chat requests per person per minute
     digest_enabled: bool = True
     digest_hour_utc: int = 3  # 03:00 UTC = 08:30 IST
 

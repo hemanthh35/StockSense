@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Icon, LogoMark } from './icons.jsx'
+import CommandPalette from './CommandPalette.jsx'
 import { Menu } from './ui.jsx'
 import { atLeast, ROLE_LABEL } from '../perm.js'
 
@@ -26,6 +27,12 @@ export default function Layout({ user, onLogout }) {
   const nav = useNavigate()
   const { pathname } = useLocation()
   const [mobile, setMobile] = useState(false)
+  const [palette, setPalette] = useState(false)
+  useEffect(() => {
+    const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p) } }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
 
   return (
     <>
@@ -59,6 +66,7 @@ export default function Layout({ user, onLogout }) {
             )}
           </nav>
 
+          <button className="search-hint" onClick={() => setPalette(true)} aria-label="Search or jump to"><Icon name="search" size={15} /><span>Search</span><kbd>Ctrl K</kbd></button>
           <Menu
             align="right"
             trigger={(_, toggle) => (
@@ -76,6 +84,7 @@ export default function Layout({ user, onLogout }) {
           </Menu>
         </div>
       </header>
+      <CommandPalette user={user} open={palette} onClose={() => setPalette(false)} />
       <main className="page">
         <Outlet />
       </main>

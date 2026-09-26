@@ -15,7 +15,7 @@ const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, 
 export function Products({ user }) {
   const canManage = atLeast(user, 'manager')
   const [params, setParams] = useSearchParams()
-  const [q, setQ] = useState('')
+  const [q, setQ] = useState(params.get('q') || '')
   const [cat, setCat] = useState('')
   const dq = useDebounced(q)
   const [showArchived, setShowArchived] = useState(false)
