@@ -236,6 +236,21 @@ def t_business_report(c: Ctx, a: dict) -> dict:
     return {"kind": "valuation", "totals": r["totals"], "by_category": r.get("by_category"), "top_products": r["rows"][:10]}
 
 
+def t_stock_forecast(c: Ctx, a: dict) -> dict:
+    r = reports.forecast_rows(c.db, max(7, min(int(a.get("days", 30) or 30), 365)))
+    return {"based_on_days": r["days"], "counts": r["counts"], "soonest_to_run_out": [
+        {k: x[k] for k in ("sku", "name", "on_hand", "incoming", "per_day", "days_left", "runs_out_on", "level")} for x in r["rows"][:12]]}
+
+
+def t_expiring_stock(c: Ctx, a: dict) -> dict:
+    from ..routers.lots import lots_page
+    days = max(1, min(int(a.get("days", 30) or 30), 365))
+    rows = lots_page(c.db, days=days, status=a.get("status") or "soon", page=_p(15))
+    from .. import lots as lots_mod
+    return {"summary": lots_mod.summary(c.db, days), "lots": [
+        {k: x[k] for k in ("sku", "name", "lot_no", "expiry_date", "days_left", "remaining", "value")} for x in rows["items"]]}
+
+
 def t_list_contacts(c: Ctx, a: dict) -> dict:
     stmt = select(Party).where(Party.active.is_(True)).order_by(Party.name).limit(15)
     if a.get("query"):
@@ -287,7 +302,7 @@ def _prepare_reorder(c: Ctx, a: dict) -> tuple[dict, str]:
 
 def _execute_reorder(c: Ctx, args: dict) -> dict:
     out = inventory.reorder_receipt(inventory.ReorderIn(warehouse_id=args.get("warehouse_id")), c.db, c.user)
-    return {"reference": out["reference"], "id": out["id"], "status": out["status"]}
+    return {"reference": out["reference"], "id": out["id"], "type": "IN", "status": out["status"]}
 
 
 def _prepare_adjust(c: Ctx, a: dict) -> tuple[dict, str]:
@@ -324,7 +339,7 @@ def _prepare_advance(c: Ctx, a: dict) -> tuple[dict, str]:
 
 def _execute_advance(c: Ctx, args: dict) -> dict:
     out = operations.operation_action(args["op_id"], args["action"], None, None, c.db, c.user)
-    return {"reference": out["reference"], "id": out["id"], "status": out["status"], "message": out.get("message")}
+    return {"reference": out["reference"], "id": out["id"], "type": out["type"], "status": out["status"], "message": out.get("message")}
 
 
 DATE = {**S, "description": "YYYY-MM-DD, optional"}
@@ -339,6 +354,8 @@ TOOLS: list[Tool] = [
     Tool("dashboard_summary", "Business snapshot: stock value, low/out-of-stock counts, documents to process and late.", _obj({}), run=t_dashboard_summary),
     Tool("find_incoming_stock", "Open receipts that will bring more of a product, with dates and suppliers.", _obj({"product": S}, ["product"]), run=t_find_incoming),
     Tool("business_report", "Stock valuation, or sales margin over the last N days.", _obj({"kind": {"type": "string", "enum": ["valuation", "margin"]}, "days": {"type": "integer"}}, ["kind"]), run=t_business_report),
+    Tool("stock_forecast", "Which products will run out soonest at the recent pace of deliveries (days of stock left).", _obj({"days": {"type": "integer", "description": "sales window, default 30"}}), run=t_stock_forecast),
+    Tool("expiring_stock", "Batches that expire soon or already expired (status: soon | expired | ok | none).", _obj({"days": {"type": "integer"}, "status": {"type": "string", "enum": ["soon", "expired", "ok", "none"]}}), run=t_expiring_stock),
     Tool("list_contacts", "Saved suppliers and customers (names and GSTIN only).", _obj({"query": S, "kind": {"type": "string", "enum": ["vendor", "customer"]}}), run=t_list_contacts),
     Tool("create_receipt", "PROPOSE a draft receipt (goods coming in). The user must confirm before anything is created.",
          _obj({"supplier": S, "warehouse": S, "schedule_date": DATE, "lines": LINES}, ["lines"]), role="manager",

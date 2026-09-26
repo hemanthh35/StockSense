@@ -8,9 +8,11 @@ import CategoryManager from '../components/CategoryManager.jsx'
 import ProductImport from '../components/ProductImport.jsx'
 import { ArchivedTag, LifecycleActions } from '../components/Lifecycle.jsx'
 import StockReports from './StockReports.jsx'
+import Forecast from './Forecast.jsx'
+import Expiry from './Expiry.jsx'
 import { Empty, ExportButton, Field, Modal, PageHeader, Segmented, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
-const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, cost_price: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
+const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, cost_price: 0, hsn_code: '', barcode: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
 
 export function Products({ user }) {
   const canManage = atLeast(user, 'manager')
@@ -43,6 +45,7 @@ export function Products({ user }) {
         category_id: form.category_id ? Number(form.category_id) : null,
         tax_id: form.tax_id === '' ? null : Number(form.tax_id),
         hsn_code: form.hsn_code || null,
+        barcode: form.barcode || null,
         initial_location_id: form.initial_location_id ? Number(form.initial_location_id) : null,
         unit_cost: Number(form.unit_cost), cost_price: Number(form.cost_price || 0), reorder_min: Number(form.reorder_min),
         reorder_qty: Number(form.reorder_qty), initial_stock: Number(form.initial_stock),
@@ -86,7 +89,7 @@ export function Products({ user }) {
             <tbody>
               {paged.loading && !rows.length && <TableSkeleton cols={8} />}
               {rows.map((p) => (
-                <tr key={p.id} style={{ opacity: p.active ? 1 : 0.6, cursor: canManage ? 'pointer' : 'default' }} onClick={() => canManage && setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
+                <tr key={p.id} style={{ opacity: p.active ? 1 : 0.6, cursor: canManage ? 'pointer' : 'default' }} onClick={() => canManage && setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '', barcode: p.barcode || '' })}>
                   <td className="strong">{p.name} {!p.active && <ArchivedTag />}<span className="sub mono">{p.sku}</span></td>
                   <td>{p.category ? <span className="tag">{p.category}</span> : <span className="dim">—</span>}</td>
                   <td className="muted">{p.uom}</td>
@@ -148,6 +151,7 @@ export function Products({ user }) {
                 {taxes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </Field>
+            <Field label="Barcode" hint="Optional. Scanning the SKU works too"><input value={form.barcode} onChange={set('barcode')} className="mono" inputMode="numeric" /></Field>
             <Field label="HSN / SAC code" hint="Optional"><input value={form.hsn_code} onChange={set('hsn_code')} className="mono" inputMode="numeric" /></Field>
             <Field label="Reorder when stock ≤"><input type="number" min="0" step="any" value={form.reorder_min} onChange={set('reorder_min')} /></Field>
             <Field label="Reorder quantity"><input type="number" min="0" step="any" value={form.reorder_qty} onChange={set('reorder_qty')} /></Field>
@@ -257,11 +261,13 @@ function StockLevels({ tabs }) {
   )
 }
 
-const STOCK_TABS = [{ value: 'stock', label: 'Availability' }, { value: 'valuation', label: 'Valuation' }, { value: 'margin', label: 'Margin' }]
+const STOCK_TABS = [{ value: 'stock', label: 'Availability' }, { value: 'valuation', label: 'Valuation' }, { value: 'margin', label: 'Margin' }, { value: 'forecast', label: 'Forecast' }, { value: 'expiry', label: 'Expiry' }]
 
 /** Stock: what you have, what it is worth, and what you earn on it. */
 export function Stock() {
   const [view, setView] = useState('stock')
   const tabs = <div style={{ marginBottom: 16 }}><Segmented value={view} onChange={setView} options={STOCK_TABS} /></div>
+  if (view === 'forecast') return <Forecast tabs={tabs} />
+  if (view === 'expiry') return <Expiry tabs={tabs} />
   return view === 'stock' ? <StockLevels tabs={tabs} /> : <StockReports view={view} tabs={tabs} />
 }

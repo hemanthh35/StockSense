@@ -11,7 +11,7 @@ from ..deps import current_user
 from ..filters import op_filters
 from ..models import Category, Operation, OperationLine, Product, User
 from ..pagination import PageParams
-from ..queries import cost_expr, internal_stock
+from ..queries import cost_expr, incoming_map, internal_stock, on_hand_map
 from ..stock import utcnow
 
 router = APIRouter(tags=["reports"])
@@ -138,3 +138,56 @@ def margin(
 ):
     """Revenue (before tax) against average cost for deliveries validated in the last `days` days."""
     return margin_rows(db, max(1, min(days, 3650)), warehouse_id, category_id, page)
+
+
+# ------------------------------------------------------------------ forecast
+def forecast_rows(db: Session, days: int, warehouse_id: int | None = None, page: PageParams | None = None, level: str | None = None) -> dict:
+    """Days of stock left per product, from what was delivered over the last `days` days. Products nobody bought are left out."""
+    since = utcnow() - timedelta(days=days)
+    sold = (
+        select(OperationLine.product_id, func.sum(OperationLine.quantity))
+        .join(Operation, Operation.id == OperationLine.operation_id)
+        .where(Operation.type == "OUT", Operation.status == "done", Operation.done_at >= since)
+        .group_by(OperationLine.product_id)
+    )
+    if warehouse_id:
+        sold = sold.where(Operation.warehouse_id == warehouse_id)
+    sold_by = {pid: float(q or 0) for pid, q in db.execute(sold).all() if q and q > 0}
+    ids = list(sold_by)
+    products = {p.id: p for p in db.scalars(select(Product).where(Product.id.in_(ids), Product.active.is_(True)))} if ids else {}
+    have = on_hand_map(db, list(products), warehouse_id)
+    coming = incoming_map(db, warehouse_id, list(products))
+    today = utcnow().date()
+    rows = []
+    for pid, p in products.items():
+        qty, per_day = have.get(pid, 0.0), sold_by[pid] / days
+        left = qty / per_day if per_day else None
+        level = "out" if qty <= 0 else "critical" if left < 7 else "soon" if left < 14 else "ok"
+        rows.append({
+            "product_id": pid, "sku": p.sku, "name": p.name, "on_hand": qty, "incoming": coming.get(pid, 0.0),
+            "sold": sold_by[pid], "per_day": round(per_day, 2), "days_left": round(left, 1),
+            "runs_out_on": (today + timedelta(days=int(left))).isoformat() if qty > 0 else None,
+            "level": level, "reorder_min": p.reorder_min,
+        })
+    rows.sort(key=lambda r: (r["days_left"], r["name"]))
+    counts = {k: sum(1 for r in rows if r["level"] == k) for k in ("out", "critical", "soon", "ok")}
+    if level:
+        rows = [r for r in rows if r["level"] == level]
+    report = {"days": days, "rows": rows, "counts": counts}
+    if page is not None and page.enabled:
+        report.update({"rows": rows[page.offset:page.offset + page.size], "items": rows[page.offset:page.offset + page.size],
+                       "total": len(rows), "page": page.page, "page_size": page.size, "pages": max(1, math.ceil(len(rows) / page.size))})
+    return report
+
+
+@router.get("/reports/forecast")
+def forecast(
+    days: int = 30,
+    warehouse_id: int | None = None,
+    level: str | None = None,
+    page: PageParams = Depends(),
+    db: Session = Depends(get_db),
+    _: User = Depends(current_user),
+):
+    """How long the stock will last at the recent pace of deliveries, soonest to run out first."""
+    return forecast_rows(db, max(7, min(days, 365)), warehouse_id, page, level)

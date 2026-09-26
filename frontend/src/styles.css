@@ -499,3 +499,75 @@ kbd { font: 500 11.5px var(--mono); padding: 1px 6px; border: 1px solid var(--bo
   .field-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
   .stepper li:not(.on) { display: none; } .badge { background: none; border: 1px solid #999; }
 }
+
+/* ============ assistant ============ */
+.ai-btn { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border-2); background: var(--lav-bg); color: var(--lav); font-weight: 600; cursor: pointer; }
+.ai-btn:hover { background: #dcd4fa; }
+.ai-panel { position: fixed; right: 18px; bottom: 18px; width: 400px; max-width: calc(100vw - 24px); height: min(640px, calc(100vh - 100px)); background: var(--surface); border: 1px solid var(--border-2); border-radius: 18px; box-shadow: var(--shadow); display: flex; flex-direction: column; z-index: 55; animation: rise .16s ease-out; overflow: hidden; }
+.ai-panel header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.ai-panel header > div { flex: 1; min-width: 0; } .ai-panel header small { display: block; color: var(--text-3); font-size: 12px; }
+.ai-spark { width: 30px; height: 30px; border-radius: 9px; background: var(--lav-bg); color: var(--lav); display: grid; place-items: center; }
+.ai-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; background: var(--surface-2); }
+.ai-empty p { color: var(--text-2); margin-bottom: 10px; }
+.ai-ideas { display: flex; flex-direction: column; gap: 8px; }
+.ai-ideas button { text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border-2); background: var(--surface); cursor: pointer; }
+.ai-ideas button:hover { border-color: var(--lav); }
+.ai-msg { display: flex; flex-direction: column; gap: 8px; max-width: 92%; }
+.ai-msg.user { align-self: flex-end; align-items: flex-end; }
+.ai-bubble { padding: 9px 12px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); overflow-wrap: anywhere; }
+.ai-bubble p + p { margin-top: 6px; }
+.ai-msg.user .ai-bubble { background: var(--accent-soft); border-color: transparent; }
+.ai-msg.error .ai-bubble { background: var(--red-bg); color: var(--red); border-color: transparent; }
+.ai-typing { display: flex; gap: 4px; } .ai-typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); animation: aidot 1s infinite; }
+.ai-typing i:nth-child(2) { animation-delay: .15s; } .ai-typing i:nth-child(3) { animation-delay: .3s; }
+@keyframes aidot { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
+.ai-proposal { border: 1px solid var(--lav); background: var(--surface); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.ai-proposal.done { border-color: var(--green); } .ai-proposal.cancelled { opacity: .6; } .ai-proposal.error { border-color: var(--red); }
+.ai-prop-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--lav); text-transform: uppercase; letter-spacing: .05em; }
+.ai-prop-actions { display: flex; gap: 8px; }
+.ai-ok { color: var(--green); font-weight: 600; } .ai-err { color: var(--red); }
+.ai-input { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+.ai-input input { flex: 1; min-width: 0; }
+@media (max-width: 640px) { .ai-btn span { display: none; } .ai-panel { right: 8px; bottom: 8px; width: calc(100vw - 16px); height: calc(100vh - 80px); } }
+
+/* ============ forecast ============ */
+.tile-btn { text-align: left; cursor: pointer; font: inherit; } .tile-btn.on { outline: 2px solid var(--lav); }
+.lvl { display: inline-block; padding: 2px 10px; border-radius: 6px; font-weight: 600; }
+.lvl-out, .lvl-critical { background: var(--red-bg); color: var(--red); } .lvl-soon { background: var(--amber-bg); color: var(--amber); } .lvl-ok { background: var(--green-bg); color: var(--green); }
+
+/* ============ paper documents (challan, invoice, pick list) ============ */
+.print-sheet { display: none; }
+@media print {
+  body.printing-sheet .page > *:not(.print-sheet) { display: none !important; }
+  body.printing-sheet .print-sheet { display: block; font-size: 12.5px; }
+  .ps-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 16px; }
+  .ps-brand { display: block; font-size: 20px; } .ps-head span { font-size: 12px; }
+  .ps-title { text-align: right; } .ps-title h1 { font-size: 22px; margin: 0 0 2px; }
+  .ps-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 18px; }
+  .ps-meta small { display: block; text-transform: uppercase; letter-spacing: .06em; font-size: 10px; margin-top: 6px; } .ps-meta small:first-child { margin-top: 0; }
+  .ps-meta b { display: block; font-size: 13.5px; } .ps-meta span { display: block; }
+  .print-sheet table { width: 100%; border-collapse: collapse; }
+  .print-sheet th, .print-sheet td { border: 1px solid #999; padding: 7px 9px; text-align: left; } .print-sheet th { background: #eee !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-sheet .num { text-align: right; }
+  .ps-totals { margin: 14px 0 0 auto; width: 280px; } .ps-totals div { display: flex; justify-content: space-between; padding: 4px 0; } .ps-totals .grand { border-top: 2px solid #000; margin-top: 4px; font-size: 15px; }
+  .ps-sign { display: flex; gap: 48px; margin-top: 70px; } .ps-sign div { flex: 1; } .ps-sign span { display: block; border-bottom: 1px solid #000; height: 1px; margin-bottom: 4px; }
+  .ps-foot { margin-top: 30px; font-size: 10.5px; text-align: center; }
+}
+
+/* ============ barcode scanning ============ */
+.scan-btn { display: inline-grid; place-items: center; }
+.scanner { display: flex; flex-direction: column; gap: 10px; }
+.scan-view { position: relative; border-radius: 14px; overflow: hidden; background: #111; aspect-ratio: 4 / 3; }
+.scan-view video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.scan-line { position: absolute; left: 8%; right: 8%; top: 50%; height: 2px; background: var(--accent); box-shadow: 0 0 12px var(--accent); animation: scanline 1.8s ease-in-out infinite alternate; }
+@keyframes scanline { from { top: 25% } to { top: 75% } }
+.scan-input { display: flex; align-items: center; gap: 8px; } .scan-input input { flex: 1; min-width: 0; }
+.scan-result { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.scan-title { display: flex; justify-content: space-between; gap: 12px; } .scan-title small, .scan-qty small, .scan-loc small { display: block; color: var(--text-3); }
+.scan-qty { text-align: right; } .scan-qty b { font-size: 24px; }
+.scan-loc { display: flex; align-items: center; gap: 8px; } .scan-loc > span { flex: 1; } .scan-loc input { width: 96px; }
+.picker { position: relative; } .picker-scan { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: none; color: var(--text-3); cursor: pointer; padding: 4px; z-index: 1; } .picker-scan:hover { color: var(--lav); }
+.picker input { padding-right: 34px; }
+
+/* ============ lots ============ */
+.lot-row { display: flex; gap: 8px; margin-top: 6px; } .lot-row input { height: 32px; font-size: 13px; min-width: 0; } .lot-row input:first-child { flex: 1; }

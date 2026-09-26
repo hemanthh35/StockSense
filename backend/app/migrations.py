@@ -35,6 +35,9 @@ COLUMNS = [
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE parties ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE operations ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode VARCHAR(64)",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS lot_no VARCHAR(40)",
+    "ALTER TABLE operation_lines ADD COLUMN IF NOT EXISTS expiry_date DATE",
 ]
 MIGRATIONS = COLUMNS  # kept for older callers
 
@@ -62,6 +65,7 @@ INDEXES = [
     ("ix_stock_quants_location_id", "stock_quants", "location_id"),
     ("ix_products_category_id", "products", "category_id"),
     ("ix_products_active", "products", "active"),
+    ("ix_products_barcode", "products", "barcode"),
     ("ix_locations_warehouse_id", "locations", "warehouse_id"),
 ]
 

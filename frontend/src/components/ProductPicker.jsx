@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useDebounced } from '../hooks'
+import { Icon } from './icons.jsx'
+import { Modal } from './ui.jsx'
+import Scanner, { cameraScanSupported } from './Scanner.jsx'
 
 /**
  * Search-as-you-type product selector. It asks the server for a handful of matches instead of loading the
@@ -12,6 +15,8 @@ export default function ProductPicker({ label, onPick, disabled, placeholder = '
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(false)
   const [cursor, setCursor] = useState(0)
+  const [scanning, setScanning] = useState(false)
+  const [scanErr, setScanErr] = useState('')
   const dq = useDebounced(q, 200)
   const box = useRef()
 
@@ -32,6 +37,15 @@ export default function ProductPicker({ label, onPick, disabled, placeholder = '
     return () => document.removeEventListener('mousedown', h)
   }, [])
 
+  const scanned = async (code) => {
+    setScanErr('')
+    try {
+      const hit = await api('/products/lookup', { params: { code } })
+      const [p] = await api('/products', { params: { ids: hit.product_id } })
+      choose(p)
+      setScanning(false)
+    } catch (e) { setScanErr(e.message) }
+  }
   const choose = (p) => { onPick(p); setOpen(false); setQ('') }
   const onKey = (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setCursor((c) => Math.min(c + 1, items.length - 1)) }
@@ -42,6 +56,7 @@ export default function ProductPicker({ label, onPick, disabled, placeholder = '
 
   return (
     <div className="picker" ref={box}>
+      {!disabled && <button type="button" className="picker-scan" tabIndex={-1} onClick={() => setScanning(true)} aria-label="Scan a barcode"><Icon name="scan" size={16} /></button>}
       <input
         role="combobox"
         aria-expanded={open}
@@ -64,6 +79,12 @@ export default function ProductPicker({ label, onPick, disabled, placeholder = '
             </li>
           ))}
         </ul>
+      )}
+      {scanning && (
+        <Modal title="Scan a product" subtitle="It is added to this line." onClose={() => setScanning(false)} width={440}>
+          <Scanner onDetect={scanned} />
+          {scanErr && <div className="banner" role="alert" style={{ marginTop: 14 }}>{scanErr}</div>}
+        </Modal>
       )}
     </div>
   )

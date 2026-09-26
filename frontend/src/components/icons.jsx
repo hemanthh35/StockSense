@@ -33,6 +33,8 @@ const P = {
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
   download: <path d="M12 3v12m0 0-4-4m4 4 4-4M4 20h16" />,
   upload: <path d="M12 16V4m0 0L8 8m4-4 4 4M4 20h16" />,
+  spark: <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z" />,
+  scan: <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16" />,
   tag: <><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z" /><circle cx="8" cy="8" r="1.4" /></>,
 }
 

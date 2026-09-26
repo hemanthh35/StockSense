@@ -7,7 +7,8 @@ import { Icon } from '../components/icons.jsx'
 import History from '../components/History.jsx'
 import PartyModal from '../components/PartyModal.jsx'
 import ProductPicker from '../components/ProductPicker.jsx'
-import { Field, Modal, PageHeader, Status, Stepper, Toast, money, num, useToast } from '../components/ui.jsx'
+import PrintSheet, { sheetsFor } from '../components/PrintSheet.jsx'
+import { Field, Menu, Modal, PageHeader, Status, Stepper, Toast, money, num, useToast } from '../components/ui.jsx'
 import { KINDS } from './Operations.jsx'
 
 const PATH = { IN: 'receipts', OUT: 'deliveries', INT: 'transfers', ADJ: 'adjustments' }
@@ -21,13 +22,13 @@ const toForm = (o) => ({
   schedule_date: o.schedule_date,
   source_location_id: o.source_location.id,
   dest_location_id: o.dest_location.id,
-  lines: o.lines.map((l) => ({ product_id: l.product_id, label: l.product, quantity: l.quantity, unit_price: l.unit_price })),
+  lines: o.lines.map((l) => ({ product_id: l.product_id, label: l.product, quantity: l.quantity, unit_price: l.unit_price, lot_no: l.lot_no || '', expiry_date: l.expiry_date || '' })),
 })
 
 /** A comparable fingerprint of what the user can edit, used to detect unsaved changes. */
 const snap = (f) => JSON.stringify({
   c: f.contact || '', p: String(f.party_id ?? ''), d: f.schedule_date, s: String(f.source_location_id ?? ''), t: String(f.dest_location_id ?? ''),
-  l: f.lines.map((l) => [String(l.product_id), Number(l.quantity), Number(l.unit_price)]),
+  l: f.lines.map((l) => [String(l.product_id), Number(l.quantity), Number(l.unit_price), l.lot_no || '', l.expiry_date || '']),
 })
 
 // money is rounded to whole paise per line, half-up, exactly as the server does, so the preview matches what gets saved
@@ -208,6 +209,7 @@ export default function OperationDetail({ user }) {
       product_id: Number(l.product_id),
       quantity: Number(l.quantity),
       unit_price: l.unit_price === '' || l.unit_price == null ? null : Number(l.unit_price),
+      ...(t === 'IN' ? { lot_no: l.lot_no || null, expiry_date: l.expiry_date || null } : {}),
     })),
   })
   const save = async () => {
@@ -273,13 +275,23 @@ export default function OperationDetail({ user }) {
   // the one primary action for the current state
   const isDelivery = t === 'OUT'
   const canPartial = status === 'ready' && op?.lines.length > 0 && (t === 'IN' || (isDelivery && op?.packed))
+  const [sheet, setSheet] = useState(null)
+  useEffect(() => {
+    const done = () => { document.body.classList.remove('printing-sheet'); setSheet(null) }
+    window.addEventListener('afterprint', done)
+    return () => window.removeEventListener('afterprint', done)
+  }, [])
+  const printAs = (kindOfSheet) => {
+    setSheet(kindOfSheet)
+    if (kindOfSheet) document.body.classList.add('printing-sheet')
+    setTimeout(() => window.print(), 80)
+  }
   const primary =
     status === 'draft' && (!isNew || canEdit) ? <button className="btn primary" disabled={busy} onClick={act('todo')}><Icon name="check" size={16} />To do</button>
     : status === 'waiting' ? <button className="btn" disabled={busy} onClick={act('check')}><Icon name="refresh" size={16} />Check availability</button>
     : status === 'ready' && isDelivery && !op?.picked ? <button className="btn primary" disabled={busy} onClick={act('pick')}><Icon name="box" size={16} />Mark picked</button>
     : status === 'ready' && isDelivery && !op?.packed ? <button className="btn primary" disabled={busy} onClick={act('pack')}><Icon name="box" size={16} />Mark packed</button>
     : status === 'ready' ? <button className="btn primary" disabled={busy} onClick={act('validate')}><Icon name="check" size={16} />Validate</button>
-    : status === 'done' ? <button className="btn" onClick={() => window.print()}><Icon name="print" size={16} />Print</button>
     : null
 
   return (
@@ -290,6 +302,12 @@ export default function OperationDetail({ user }) {
         actions={
           <div className="ph-actions no-print">
             {primary}
+            {!isNew && op && (
+              <Menu align="right" trigger={(_, toggle) => <button className="btn" onClick={toggle}><Icon name="print" size={16} />Print<Icon name="down" size={14} className="caret" /></button>}>
+                {sheetsFor(op).map((s) => <a key={s.id} className="menu-item slim" onClick={() => printAs(s.id)}><Icon name="print" size={16} />{s.label}</a>)}
+                <a className="menu-item slim" onClick={() => printAs(null)}><Icon name="print" size={16} />This page</a>
+              </Menu>
+            )}
             {canPartial && <button className="btn" disabled={busy} onClick={() => setPartialOpen(true)}>Validate partially…</button>}
             {editable && <button className={`btn ${dirty ? 'primary' : ''}`} disabled={busy} onClick={guard(async () => { await save(); notify('Saved', 'ok') })}>Save</button>}
             {!isNew && priced && canEdit && <button className="btn ghost" disabled={busy} onClick={duplicate}>Duplicate</button>}
@@ -425,6 +443,12 @@ export default function OperationDetail({ user }) {
                       {editable ? (
                         <ProductPicker label={l.label} onPick={(pp) => pickProduct(i, pp)} />
                       ) : <span className="strong">{ln?.product}</span>}
+                      {t === 'IN' && (editable ? (
+                        <div className="lot-row">
+                          <input placeholder="Lot no. (optional)" maxLength={40} value={l.lot_no || ''} onChange={(e) => setLine(i, { lot_no: e.target.value })} />
+                          <input type="date" title="Expiry date" value={l.expiry_date || ''} onChange={(e) => setLine(i, { expiry_date: e.target.value })} />
+                        </div>
+                      ) : (ln?.lot_no || ln?.expiry_date) && <span className="sub">{ln.lot_no ? `Lot ${ln.lot_no}` : ''}{ln.lot_no && ln.expiry_date ? ' · ' : ''}{ln.expiry_date ? `Expires ${new Date(ln.expiry_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}` : ''}</span>)}
                       {bad && <div className="line-warn"><Icon name="alert" size={13} />Short by {num(ln.missing)} — not in stock</div>}
                     </td>
                     <td className="num">
@@ -457,6 +481,8 @@ export default function OperationDetail({ user }) {
         </div>
         {priced && <Totals lines={totalsLines} />}
       </div>
+
+      <PrintSheet op={op} kind={sheet} />
 
       {!isNew && op && <History path={`/operations/${op.id}/history`} refreshKey={op.version} />}
 

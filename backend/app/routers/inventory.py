@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from .. import audit, stock
+from .. import audit, lots, stock
 from ..db import get_db
 from ..deps import current_user, manager
 from ..filters import op_filters
@@ -31,7 +31,7 @@ def stock_rows(db: Session, *, q=None, warehouse_id=None, category_id=None, page
     base = select(Product).where(Product.active.is_(True))
     if q:
         like = f"%{q}%"
-        base = base.where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
+        base = base.where(or_(Product.name.ilike(like), Product.sku.ilike(like), Product.barcode.ilike(like)))
     if category_id:
         base = base.where(Product.category_id == category_id)
     stmt = base.options(joinedload(Product.category)).order_by(Product.name, Product.id)
@@ -81,6 +81,19 @@ def stock_list(
     _: User = Depends(current_user),
 ):
     return stock_rows(db, q=q, warehouse_id=warehouse_id, category_id=category_id, page=page)
+
+
+@router.get("/products/lookup")
+def lookup_product(code: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    """Scan a barcode (or type a SKU): the matching product with its stock by location."""
+    code = code.strip()
+    p = db.scalar(select(Product).where(
+        Product.active.is_(True), or_(Product.barcode == code, func.upper(Product.sku) == code.upper())).limit(1))
+    if not p:
+        raise HTTPException(404, f"No product with the barcode or SKU '{code[:40]}'")
+    row = next(r for r in stock_rows(db, q=p.sku) if r["product_id"] == p.id)
+    incoming = incoming_map(db, None, [p.id]).get(p.id, 0)
+    return {**row, "barcode": p.barcode, "uom": p.uom, "incoming": incoming, "reorder_qty": p.reorder_qty}
 
 
 @router.post("/stock/adjust")
@@ -277,6 +290,8 @@ def dashboard(
             "stock_value": round(float(value), 2),
             "low_stock": low_in_stock,
             "out_of_stock": out_of_stock,
+            "expired_lots": (lot_sum := lots.summary(db))["expired"],
+            "expiring_lots": lot_sum["expiring_soon"],
             "pending_receipts": pending["IN"],
             "pending_deliveries": pending["OUT"],
             "internal_transfers_scheduled": pending["INT"],

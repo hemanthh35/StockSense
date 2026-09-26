@@ -125,6 +125,7 @@ class Product(Base):
     reorder_min: Mapped[float] = mapped_column(Qty, default=0)
     reorder_qty: Mapped[float] = mapped_column(Qty, default=0)
     hsn_code: Mapped[str | None] = mapped_column(String(20))
+    barcode: Mapped[str | None] = mapped_column(String(64), index=True)  # EAN/UPC on the pack; the SKU also works when scanning
     active: Mapped[bool] = mapped_column(default=True, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)  # optimistic locking: bumped on every user edit
     tax_id: Mapped[int | None] = mapped_column(ForeignKey("taxes.id"))
@@ -194,5 +195,22 @@ class OperationLine(Base):
     tax_name: Mapped[str | None] = mapped_column(String(60))
     ordered_qty: Mapped[float | None] = mapped_column(Qty)  # original demand when a line was validated partially
     cost_price: Mapped[float | None] = mapped_column(Money)  # average cost when the line moved (for margin)
+    lot_no: Mapped[str | None] = mapped_column(String(40))  # receipts only: the batch this line brings in
+    expiry_date: Mapped[date | None] = mapped_column(Date)
     operation: Mapped[Operation] = relationship(back_populates="lines")
     product: Mapped[Product] = relationship()
+
+
+class StockLot(Base):
+    """A batch of one product with an expiry date, created when a receipt is validated and used up first-expiry-first."""
+
+    __tablename__ = "stock_lots"
+    __table_args__ = (UniqueConstraint("product_id", "lot_no", name="uq_stock_lots_product_lot"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    lot_no: Mapped[str] = mapped_column(String(40))
+    expiry_date: Mapped[date | None] = mapped_column(Date, index=True)
+    received_qty: Mapped[float] = mapped_column(Qty, default=0)
+    remaining_qty: Mapped[float] = mapped_column(Qty, default=0)
+    received_on: Mapped[date | None] = mapped_column(Date)
+    source_ref: Mapped[str | None] = mapped_column(String(30))

@@ -27,6 +27,8 @@ class LineIn(BaseModel):
     product_id: int
     quantity: Annotated[float, Field(le=BIG)]
     unit_price: Annotated[float, Field(ge=0, le=BIG)] | None = None  # blank = the product's default price
+    lot_no: str | None = Field(default=None, max_length=40)  # receipts: the batch number printed on the goods
+    expiry_date: date | None = None  # receipts: best-before / expiry date
 
 
 class ValidateLine(BaseModel):
@@ -100,6 +102,8 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
                 "quantity": ln.quantity,
                 "ordered_qty": ln.ordered_qty,
                 "cost_price": ln.cost_price,
+                "lot_no": ln.lot_no,
+                "expiry_date": ln.expiry_date.isoformat() if ln.expiry_date else None,
                 "unit_price": ln.unit_price or 0,
                 "tax_rate": ln.tax_rate or 0,
                 "tax_name": ln.tax_name,
@@ -224,6 +228,9 @@ def _make_lines(db: Session, lines: list[LineIn], op_type: str | None = None) ->
     for l in lines:
         product = found[l.product_id]
         ln = OperationLine(product_id=product.id, quantity=l.quantity)
+        if op_type == "IN":
+            ln.lot_no = (l.lot_no or "").strip() or None
+            ln.expiry_date = l.expiry_date
         pricing.fill_line(ln, product, l.unit_price, op_type)
         out.append(ln)
     return out

@@ -18,7 +18,7 @@ router = APIRouter(tags=["products"])
 Money = Annotated[float, Field(ge=0, le=1_000_000_000)]
 Qty = Annotated[float, Field(ge=0, le=1_000_000_000)]
 
-TRACKED = ["name", "sku", "category_id", "uom", "unit_cost", "cost_price", "reorder_min", "reorder_qty", "hsn_code", "tax_id"]
+TRACKED = ["name", "sku", "category_id", "uom", "unit_cost", "cost_price", "reorder_min", "reorder_qty", "hsn_code", "tax_id", "barcode"]
 
 
 class CategoryIn(BaseModel):
@@ -35,6 +35,7 @@ class ProductIn(BaseModel):
     reorder_min: Qty = 0
     reorder_qty: Qty = 0
     hsn_code: str | None = Field(default=None, max_length=20)
+    barcode: str | None = Field(default=None, max_length=64)
     tax_id: int | None = None  # None = auto (category default, then global default); 0 = no tax
     initial_stock: Qty = 0
     initial_location_id: int | None = None
@@ -58,6 +59,7 @@ def product_out(db: Session, p: Product, on_hand: float | None = None) -> dict:
         "reorder_min": p.reorder_min,
         "reorder_qty": p.reorder_qty,
         "hsn_code": p.hsn_code,
+        "barcode": p.barcode,
         "tax_id": p.tax_id,
         "tax": {"id": p.tax.id, "name": p.tax.name, "rate": p.tax.rate} if p.tax else None,
         "active": p.active,
@@ -75,6 +77,17 @@ def products_out(db: Session, products: list[Product]) -> list[dict]:
 
 def total_qty_zero(db: Session, p: Product) -> bool:
     return stock.total_on_hand(db, p.id) <= 0
+
+
+def _clean_barcode(db: Session, raw: str | None, own_id: int | None = None) -> str | None:
+    """A barcode identifies one product: it may not equal another product's barcode or SKU."""
+    code = (raw or "").strip() or None
+    if code:
+        other = db.scalar(select(Product).where(
+            Product.id != (own_id or 0), or_(Product.barcode == code, func.upper(Product.sku) == code.upper())))
+        if other:
+            raise HTTPException(409, f"That barcode is already used by {other.name} ({other.sku})")
+    return code
 
 
 def _resolve_tax_id(db: Session, body: ProductIn) -> int | None:
@@ -154,7 +167,7 @@ def product_query(q: str | None, category_id: int | None, include_archived: bool
         stmt = stmt.where(Product.active.is_(True))
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
+        stmt = stmt.where(or_(Product.name.ilike(like), Product.sku.ilike(like), Product.barcode.ilike(like)))
     if category_id:
         stmt = stmt.where(Product.category_id == category_id)
     if ids:
@@ -191,11 +204,12 @@ def create_product(body: ProductIn, db: Session = Depends(get_db), user: User = 
         raise HTTPException(422, "Name and SKU are required")
     if db.scalar(select(Product).where(Product.sku == sku)):
         raise HTTPException(409, "SKU already exists")
+    barcode = _clean_barcode(db, body.barcode)
     p = Product(
         name=body.name.strip(), sku=sku, category_id=body.category_id, uom=body.uom or "Unit",
         unit_cost=body.unit_cost, cost_price=body.cost_price, avg_cost=body.cost_price or body.unit_cost,
         reorder_min=body.reorder_min, reorder_qty=body.reorder_qty,
-        hsn_code=(body.hsn_code or "").strip() or None, tax_id=_resolve_tax_id(db, body),
+        hsn_code=(body.hsn_code or "").strip() or None, tax_id=_resolve_tax_id(db, body), barcode=barcode,
     )
     db.add(p)
     db.flush()
@@ -233,6 +247,7 @@ def update_product(pid: int, body: ProductIn, db: Session = Depends(get_db), act
         p.avg_cost = body.cost_price or body.unit_cost  # nothing on the shelf, so re-base the average
     p.hsn_code = (body.hsn_code or "").strip() or None
     p.tax_id = _resolve_tax_id(db, body)
+    p.barcode = _clean_barcode(db, body.barcode, pid)
     if changes := audit.diff(old, audit.snapshot(p, TRACKED)):
         bump(p)
         audit.record(db, actor, "update", "product", p.id, f"{p.sku} · {p.name}", changes=changes)

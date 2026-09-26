@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Icon, LogoMark } from './icons.jsx'
 import CommandPalette from './CommandPalette.jsx'
+import AssistantPanel from './AssistantPanel.jsx'
+import ScanLookup from './ScanLookup.jsx'
 import { Menu } from './ui.jsx'
 import { atLeast, ROLE_LABEL } from '../perm.js'
 
@@ -28,8 +30,10 @@ export default function Layout({ user, onLogout }) {
   const { pathname } = useLocation()
   const [mobile, setMobile] = useState(false)
   const [palette, setPalette] = useState(false)
+  const [ai, setAi] = useState(false)
+  const [scan, setScan] = useState(false)
   useEffect(() => {
-    const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p) } }
+    const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p) } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') { e.preventDefault(); setAi((a) => !a) } }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
   }, [])
@@ -67,6 +71,8 @@ export default function Layout({ user, onLogout }) {
           </nav>
 
           <button className="search-hint" onClick={() => setPalette(true)} aria-label="Search or jump to"><Icon name="search" size={15} /><span>Search</span><kbd>Ctrl K</kbd></button>
+          <button className="icon-btn scan-btn" onClick={() => setScan(true)} aria-label="Scan a barcode" title="Scan a barcode"><Icon name="scan" size={19} /></button>
+          <button className="ai-btn" onClick={() => setAi((a) => !a)} aria-label="Ask the assistant" title="Assistant (Ctrl+J)"><Icon name="spark" size={16} /><span>Ask AI</span></button>
           <Menu
             align="right"
             trigger={(_, toggle) => (
@@ -85,6 +91,8 @@ export default function Layout({ user, onLogout }) {
         </div>
       </header>
       <CommandPalette user={user} open={palette} onClose={() => setPalette(false)} />
+      <AssistantPanel open={ai} onClose={() => setAi(false)} />
+      {scan && <ScanLookup onClose={() => setScan(false)} />}
       <main className="page">
         <Outlet />
       </main>

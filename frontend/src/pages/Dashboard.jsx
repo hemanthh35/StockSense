@@ -54,6 +54,8 @@ const KPIS = [
   ['total_products_in_stock', 'Products in stock'],
   ['low_stock', 'Low stock', 'warn'],
   ['out_of_stock', 'Out of stock', 'neg'],
+  ['expiring_lots', 'Expiring in 30 days', 'warn'],
+  ['expired_lots', 'Expired batches', 'neg'],
   ['pending_receipts', 'Pending receipts'],
   ['pending_deliveries', 'Pending deliveries'],
   ['internal_transfers_scheduled', 'Transfers scheduled'],

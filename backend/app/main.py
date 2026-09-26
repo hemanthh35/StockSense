@@ -13,7 +13,7 @@ from .db import SessionLocal, engine
 from .digest import run_digest_if_due
 from .migrations import MIGRATIONS, run_migrations  # noqa: F401  (MIGRATIONS re-exported for older callers)
 from .models import Base
-from .routers import assistant, auth, exports, inventory, notifications, operations, parties, products, reports, settings, users
+from .routers import assistant, auth, lots, exports, inventory, notifications, operations, parties, products, reports, settings, users
 from .seed import seed
 from .stock import utcnow
 
@@ -62,7 +62,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (assistant, auth, users, settings, products, parties, operations, inventory, reports, exports, notifications):
+for r in (assistant, auth, lots, users, settings, products, parties, operations, inventory, reports, exports, notifications):
     app.include_router(r.router, prefix="/api")
 
 

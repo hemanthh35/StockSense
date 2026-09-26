@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from . import lots
 from .models import Location, Operation, OperationLine, Product, Sequence, StockQuant, Warehouse
 
 EPS = 1e-9
@@ -207,7 +208,7 @@ def action_validate(
         for ln in list(op.lines):
             short = ln.quantity - qty[ln.id]
             if short > EPS:
-                remainder.append((ln.product_id, short, ln.unit_price, ln.tax_rate, ln.tax_name))
+                remainder.append((ln.product_id, short, ln.unit_price, ln.tax_rate, ln.tax_name, ln.lot_no, ln.expiry_date))
                 ln.ordered_qty = ln.quantity
                 if qty[ln.id] <= EPS:
                     op.lines.remove(ln)  # nothing moved for this line, it lives on in the backorder
@@ -219,6 +220,10 @@ def action_validate(
     for ln in op.lines:
         add_qty(db, ln.product_id, op.source_location, -ln.quantity)
         add_qty(db, ln.product_id, op.dest_location, ln.quantity)
+        if op.type == "OUT":
+            lots.consume(db, ln.product_id, ln.quantity)
+    if op.type == "IN":
+        lots.receive(db, op)
     op.status = "done"
     op.done_at = utcnow()
     touch(op)
@@ -231,8 +236,8 @@ def action_validate(
             warehouse_id=op.warehouse_id, source_location_id=op.source_location_id, dest_location_id=op.dest_location_id,
             backorder_of_id=op.id,
         )
-        for pid, q, price, rate, name in remainder:
-            bo.lines.append(OperationLine(product_id=pid, quantity=q, unit_price=price, tax_rate=rate, tax_name=name))
+        for pid, q, price, rate, name, lot_no, expiry in remainder:
+            bo.lines.append(OperationLine(product_id=pid, quantity=q, unit_price=price, tax_rate=rate, tax_name=name, lot_no=lot_no, expiry_date=expiry))
         db.add(bo)
         db.flush()
         action_todo(db, bo)
@@ -312,5 +317,7 @@ def adjust(db: Session, product: Product, location: Location, counted: float, us
     db.add(op)
     apply_costing(db, [(product, line)], src, dst)
     add_qty(db, product.id, location, delta)
+    if delta < 0:
+        lots.consume(db, product.id, -delta)
     promote_waiting(db)
     return op
