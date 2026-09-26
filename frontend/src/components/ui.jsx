@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { downloadCsv } from '../api'
 import { Icon } from './icons.jsx'
 
 export const STATUS_LABEL = { draft: 'Draft', waiting: 'Waiting', ready: 'Ready', done: 'Done', cancelled: 'Cancelled' }
@@ -204,3 +205,14 @@ export const Field = ({ label, hint, children, className = '' }) => (
     {hint && <span className="field-hint">{hint}</span>}
   </label>
 )
+
+/** "Export CSV" button for any list. `params` are the list's current filters. */
+export function ExportButton({ path, params, filename, onError, label = 'Export CSV' }) {
+  const [busy, setBusy] = useState(false)
+  const go = async () => {
+    setBusy(true)
+    try { await downloadCsv(path, params, filename) } catch (e) { onError?.(e.message) }
+    setBusy(false)
+  }
+  return <button className="btn" disabled={busy} onClick={go}><Icon name="download" size={16} />{busy ? 'Preparing…' : label}</button>
+}

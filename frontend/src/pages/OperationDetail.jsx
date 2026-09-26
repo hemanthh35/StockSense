@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { useApi } from '../hooks'
@@ -7,6 +7,21 @@ import { Field, PageHeader, Status, Stepper, Toast, money, num, useToast } from 
 import { KINDS } from './Operations.jsx'
 
 const blank = () => ({ warehouse_id: '', contact: '', schedule_date: new Date().toISOString().slice(0, 10), source_location_id: '', dest_location_id: '', lines: [] })
+
+const toForm = (o) => ({
+  warehouse_id: o.warehouse.id,
+  contact: o.contact || '',
+  schedule_date: o.schedule_date,
+  source_location_id: o.source_location.id,
+  dest_location_id: o.dest_location.id,
+  lines: o.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit_price: l.unit_price })),
+})
+
+/** A comparable fingerprint of what the user can edit, used to detect unsaved changes. */
+const snap = (f) => JSON.stringify({
+  c: f.contact || '', d: f.schedule_date, s: String(f.source_location_id ?? ''), t: String(f.dest_location_id ?? ''),
+  l: f.lines.map((l) => [String(l.product_id), Number(l.quantity), Number(l.unit_price)]),
+})
 
 function Totals({ lines }) {
   let sub = 0
@@ -42,6 +57,16 @@ function Totals({ lines }) {
   )
 }
 
+function PickPack({ op }) {
+  return (
+    <div className="pickpack" aria-label="Pick and pack progress">
+      <span className={`pp ${op.picked ? 'on' : ''}`}><Icon name="check" size={13} />Picked</span>
+      <span className="pp-sep" />
+      <span className={`pp ${op.packed ? 'on' : ''}`}><Icon name="check" size={13} />Packed</span>
+    </div>
+  )
+}
+
 export default function OperationDetail({ user }) {
   const { kind, id } = useParams()
   const cfg = KINDS[kind]
@@ -49,6 +74,7 @@ export default function OperationDetail({ user }) {
   const isNew = id === 'new'
   const [op, setOp] = useState(null)
   const [form, setForm] = useState(blank())
+  const baseline = useRef(snap(blank()))
   const [toast, notify, closeToast] = useToast()
   const [busy, setBusy] = useState(false)
   const products = useApi('/products').data || []
@@ -57,18 +83,13 @@ export default function OperationDetail({ user }) {
   const contacts = useApi('/contacts', { type: cfg?.type }, [kind]).data || []
 
   const hydrate = (o) => {
+    const f = toForm(o)
+    baseline.current = snap(f)
     setOp(o)
-    setForm({
-      warehouse_id: o.warehouse.id,
-      contact: o.contact || '',
-      schedule_date: o.schedule_date,
-      source_location_id: o.source_location.id,
-      dest_location_id: o.dest_location.id,
-      lines: o.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit_price: l.unit_price })),
-    })
+    setForm(f)
   }
   useEffect(() => {
-    if (isNew) { setOp(null); setForm(blank()) }
+    if (isNew) { setOp(null); setForm(blank()); baseline.current = snap(blank()) }
     else api(`/operations/${id}`).then(hydrate).catch((e) => notify(e.message, 'error'))
     // eslint-disable-next-line
   }, [id, kind])
@@ -77,6 +98,7 @@ export default function OperationDetail({ user }) {
   if (!cfg) return <div className="muted">Unknown page</div>
   const status = op?.status || 'draft'
   const editable = isNew || ['draft', 'waiting', 'ready'].includes(status)
+  const dirty = !isNew && snap(form) !== baseline.current
   const t = cfg.type
   const priced = t !== 'ADJ'
   const shortLines = (op?.lines || []).filter((l) => l.short)
@@ -116,12 +138,18 @@ export default function OperationDetail({ user }) {
     try { await fn() } catch (e) { notify(e.message, 'error') }
     setBusy(false)
   }
+  /** Run a workflow action. Drafts are saved first; later states must not be re-saved
+   *  (saving sends the document back to Draft), so unsaved edits have to be dealt with first. */
   const act = (action) => guard(async () => {
-    const saved = editable ? await save() : op
-    const o = await api(`/operations/${saved.id}/${action}`, { method: 'POST' })
+    let target = op
+    if (isNew || status === 'draft') target = await save()
+    else if (dirty) throw new Error('You have unsaved changes. Save them first (the order returns to Draft), or reload to discard.')
+    const o = await api(`/operations/${target.id}/${action}`, { method: 'POST' })
     hydrate(o)
     if (o.message) notify(o.message, o.status === 'waiting' ? 'error' : 'info')
     else if (action === 'validate') notify(`${cfg.single} validated — stock updated`, 'ok')
+    else if (action === 'pick') notify('Items picked — now pack them', 'ok')
+    else if (action === 'pack') notify('Items packed — ready to validate', 'ok')
   })
   const duplicate = guard(async () => {
     const o = await api(`/operations/${id}/duplicate`, { method: 'POST' })
@@ -143,6 +171,17 @@ export default function OperationDetail({ user }) {
   )
   const pickWarehouse = (e) => setForm({ ...form, warehouse_id: e.target.value, source_location_id: '', dest_location_id: '' })
 
+  // the one primary action for the current state
+  const isDelivery = t === 'OUT'
+  const primary =
+    status === 'draft' ? <button className="btn primary" disabled={busy} onClick={act('todo')}><Icon name="check" size={16} />To do</button>
+    : status === 'waiting' ? <button className="btn" disabled={busy} onClick={act('check')}><Icon name="refresh" size={16} />Check availability</button>
+    : status === 'ready' && isDelivery && !op?.picked ? <button className="btn primary" disabled={busy} onClick={act('pick')}><Icon name="box" size={16} />Mark picked</button>
+    : status === 'ready' && isDelivery && !op?.packed ? <button className="btn primary" disabled={busy} onClick={act('pack')}><Icon name="box" size={16} />Mark packed</button>
+    : status === 'ready' ? <button className="btn primary" disabled={busy} onClick={act('validate')}><Icon name="check" size={16} />Validate</button>
+    : status === 'done' ? <button className="btn" onClick={() => window.print()}><Icon name="print" size={16} />Print</button>
+    : null
+
   return (
     <>
       <PageHeader
@@ -150,16 +189,25 @@ export default function OperationDetail({ user }) {
         title={isNew ? `New ${cfg.single.toLowerCase()}` : cfg.single}
         actions={
           <div className="ph-actions no-print">
-            {status === 'draft' && <button className="btn primary" disabled={busy} onClick={act('todo')}><Icon name="check" size={16} />To do</button>}
-            {status === 'waiting' && <button className="btn" disabled={busy} onClick={act('check')}><Icon name="refresh" size={16} />Check availability</button>}
-            {status === 'ready' && <button className="btn primary" disabled={busy} onClick={act('validate')}><Icon name="check" size={16} />Validate</button>}
-            {status === 'done' && <button className="btn" onClick={() => window.print()}><Icon name="print" size={16} />Print</button>}
-            {editable && <button className="btn" disabled={busy} onClick={guard(async () => { await save(); notify('Saved', 'ok') })}>Save</button>}
+            {primary}
+            {editable && <button className={`btn ${dirty ? 'primary' : ''}`} disabled={busy} onClick={guard(async () => { await save(); notify('Saved', 'ok') })}>Save</button>}
             {!isNew && priced && <button className="btn ghost" disabled={busy} onClick={duplicate}>Duplicate</button>}
             {!isNew && ['draft', 'waiting', 'ready'].includes(status) && <button className="btn danger" disabled={busy} onClick={act('cancel')}>Cancel</button>}
           </div>
         }
       />
+
+      <div className="print-head">
+        <div><b>StockSense</b><span>Inventory document</span></div>
+        <div className="right"><b>{cfg.single} {op?.reference}</b><span>{op?.warehouse?.name} · printed {new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span></div>
+      </div>
+
+      {dirty && status !== 'draft' && (
+        <div className="hint-box no-print" style={{ marginBottom: 16 }}>
+          <Icon name="alert" size={16} />
+          <span>Saving these changes will send this {cfg.single.toLowerCase()} back to Draft so stock is checked again.</span>
+        </div>
+      )}
 
       {shortLines.length > 0 && (
         <div className="banner" role="alert">
@@ -176,6 +224,7 @@ export default function OperationDetail({ user }) {
           </div>
           <Stepper flow={cfg.flow} current={status} />
         </div>
+        {op && isDelivery && ['ready', 'done'].includes(status) && <PickPack op={op} />}
         <div className="card-pad">
           <div className="form-grid">
             <Field label={cfg.partner}>

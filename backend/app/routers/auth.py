@@ -12,6 +12,7 @@ from ..db import get_db
 from ..deps import current_user
 from ..mail import send_otp
 from ..models import OtpCode, User
+from ..stock import utcnow
 from ..security import create_token, hash_secret, password_problem, verify_secret
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -31,6 +32,16 @@ class LoginIn(BaseModel):
 
 class ForgotIn(BaseModel):
     email: EmailStr
+
+
+class ProfileIn(BaseModel):
+    email: EmailStr
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
 
 
 class ResetIn(BaseModel):
@@ -77,6 +88,31 @@ def me(user: User = Depends(current_user)):
     return user_out(user)
 
 
+@router.put("/me")
+def update_profile(body: ProfileIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    email = body.email.lower()
+    if db.scalar(select(User).where(func.lower(User.email) == email, User.id != user.id)):
+        raise HTTPException(409, "Email already registered")
+    user.email = email
+    db.commit()
+    return user_out(user)
+
+
+@router.post("/change-password")
+def change_password(body: ChangePasswordIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not verify_secret(body.current_password, user.password_hash):
+        raise HTTPException(400, "Current password is incorrect")
+    if problem := password_problem(body.new_password):
+        raise HTTPException(422, problem)
+    if body.new_password != body.confirm_password:
+        raise HTTPException(422, "Passwords do not match")
+    if verify_secret(body.new_password, user.password_hash):
+        raise HTTPException(422, "Choose a password different from the current one")
+    user.password_hash = hash_secret(body.new_password)
+    db.commit()
+    return {"message": "Password changed"}
+
+
 def _h(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
@@ -87,7 +123,7 @@ def forgot(body: ForgotIn, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == email))
     if user:
         code = f"{secrets.randbelow(1_000_000):06d}"
-        db.add(OtpCode(email=email, code_hash=_h(code), expires_at=datetime.utcnow() + timedelta(minutes=10)))
+        db.add(OtpCode(email=email, code_hash=_h(code), expires_at=utcnow() + timedelta(minutes=10)))
         db.commit()
         send_otp(email, code)
     # same answer either way so emails can't be enumerated
@@ -106,7 +142,7 @@ def reset(body: ResetIn, db: Session = Depends(get_db)):
         .where(OtpCode.email == email, OtpCode.used.is_(False))
         .order_by(OtpCode.id.desc())
     )
-    if not otp or otp.expires_at < datetime.utcnow() or otp.attempts >= 5:
+    if not otp or otp.expires_at < utcnow() or otp.attempts >= 5:
         raise HTTPException(400, "Code expired or invalid - request a new one")
     if not secrets.compare_digest(otp.code_hash, _h(body.otp.strip())):
         otp.attempts += 1

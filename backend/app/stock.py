@@ -1,10 +1,14 @@
 """Stock engine: quantities, reservations, references and the operation workflow."""
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import Location, Operation, OperationLine, Product, Sequence, StockQuant, Warehouse
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def next_reference(db: Session, wh: Warehouse, op_type: str) -> str:
@@ -88,6 +92,7 @@ def action_todo(db: Session, op: Operation) -> str | None:
         raise WorkflowError("Only draft records can be marked To Do")
     if not op.lines:
         raise WorkflowError("Add at least one product first")
+    op.picked_at = op.packed_at = None
     if line_shortages(db, op):
         op.status = "waiting"
         return "Some products are not in stock - moved to Waiting"
@@ -110,14 +115,39 @@ def action_validate(db: Session, op: Operation) -> str | None:
         raise WorkflowError("Only ready records can be validated")
     if line_shortages(db, op):
         op.status = "waiting"
+        op.picked_at = op.packed_at = None
         return "Not enough stock - moved back to Waiting"
+    if op.type == "OUT" and not op.packed_at:
+        raise WorkflowError("Pick and pack the items before validating the delivery")
     for ln in op.lines:
         add_qty(db, ln.product_id, op.source_location, -ln.quantity)
         add_qty(db, ln.product_id, op.dest_location, ln.quantity)
     op.status = "done"
-    op.done_at = datetime.utcnow()
+    op.done_at = utcnow()
     promote_waiting(db)
     return None
+
+
+def action_pick(db: Session, op: Operation) -> None:
+    if op.type != "OUT":
+        raise WorkflowError("Only deliveries are picked and packed")
+    if op.status != "ready":
+        raise WorkflowError("A delivery can be picked once it is Ready")
+    if op.picked_at:
+        raise WorkflowError("Items are already picked")
+    op.picked_at = utcnow()
+
+
+def action_pack(db: Session, op: Operation) -> None:
+    if op.type != "OUT":
+        raise WorkflowError("Only deliveries are picked and packed")
+    if op.status != "ready":
+        raise WorkflowError("A delivery can be packed once it is Ready")
+    if not op.picked_at:
+        raise WorkflowError("Pick the items before packing them")
+    if op.packed_at:
+        raise WorkflowError("Items are already packed")
+    op.packed_at = utcnow()
 
 
 def action_cancel(db: Session, op: Operation) -> None:
@@ -132,6 +162,7 @@ def promote_waiting(db: Session) -> None:
     for op in db.scalars(select(Operation).where(Operation.status == "waiting").order_by(Operation.id)):
         if not line_shortages(db, op):
             op.status = "ready"
+            op.picked_at = op.packed_at = None
             db.flush()
 
 
@@ -155,7 +186,7 @@ def adjust(db: Session, product: Product, location: Location, counted: float, us
         warehouse_id=wh.id,
         source_location_id=src.id,
         dest_location_id=dst.id,
-        done_at=datetime.utcnow(),
+        done_at=utcnow(),
     )
     op.lines.append(OperationLine(product_id=product.id, quantity=abs(delta), unit_price=product.unit_cost))
     db.add(op)

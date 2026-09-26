@@ -41,7 +41,7 @@ def stock_list(
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
-    stmt = select(Product).order_by(Product.name)
+    stmt = select(Product).where(Product.active.is_(True)).order_by(Product.name)
     if q:
         like = f"%{q}%"
         stmt = stmt.where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
@@ -121,7 +121,7 @@ def _suggestions(db: Session, warehouse_id: int | None) -> list[dict]:
         totals[quant.product_id] = totals.get(quant.product_id, 0) + quant.quantity
     inc = _incoming(db, warehouse_id)
     out = []
-    for p in db.scalars(select(Product).order_by(Product.name)):
+    for p in db.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name)):
         on_hand, incoming = totals.get(p.id, 0), inc.get(p.id, 0)
         qty = suggested_qty(p, on_hand, incoming)
         if qty > 0:
@@ -199,7 +199,7 @@ def dashboard(
     totals: dict[int, float] = {}
     for quant, _loc in _internal_quants(db, warehouse_id, location_id):
         totals[quant.product_id] = totals.get(quant.product_id, 0) + quant.quantity
-    pstmt = select(Product)
+    pstmt = select(Product).where(Product.active.is_(True))
     if category_id:
         pstmt = pstmt.where(Product.category_id == category_id)
     low = []

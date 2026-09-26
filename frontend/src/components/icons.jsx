@@ -31,6 +31,8 @@ const P = {
   refresh: <path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5" />,
   inbox: <path d="M22 12h-6l-2 3h-4l-2-3H2M5.5 5h13L22 12v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z" />,
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  download: <path d="M12 3v12m0 0-4-4m4 4 4-4M4 20h16" />,
+  upload: <path d="M12 16V4m0 0L8 8m4-4 4 4M4 20h16" />,
   tag: <><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z" /><circle cx="8" cy="8" r="1.4" /></>,
 }
 

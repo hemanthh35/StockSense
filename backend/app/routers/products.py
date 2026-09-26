@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import pricing, stock
+from .. import lifecycle, pricing, stock
 from ..db import get_db
 from ..deps import current_user
 from ..models import Category, Location, Product, StockQuant, Tax, User
@@ -52,6 +52,7 @@ def product_out(db: Session, p: Product, on_hand: float | None = None) -> dict:
         "hsn_code": p.hsn_code,
         "tax_id": p.tax_id,
         "tax": {"id": p.tax.id, "name": p.tax.name, "rate": p.tax.rate} if p.tax else None,
+        "active": p.active,
         "on_hand": on_hand,
         "low_stock": on_hand <= p.reorder_min,
     }
@@ -124,10 +125,13 @@ def delete_category(cid: int, db: Session = Depends(get_db), _: User = Depends(c
 def list_products(
     q: str | None = None,
     category_id: int | None = None,
+    include_archived: bool = False,
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ):
     stmt = select(Product).order_by(Product.name)
+    if not include_archived:
+        stmt = stmt.where(Product.active.is_(True))
     if q:
         like = f"%{q}%"
         stmt = stmt.where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
@@ -152,7 +156,7 @@ def create_product(body: ProductIn, db: Session = Depends(get_db), user: User = 
     db.flush()
     if body.initial_stock > 0:
         loc = db.get(Location, body.initial_location_id) if body.initial_location_id else db.scalar(
-            select(Location).where(Location.type == "internal").order_by(Location.id)
+            select(Location).where(Location.type == "internal", Location.active.is_(True)).order_by(Location.id)
         )
         if not loc or loc.type != "internal":
             raise HTTPException(422, "Choose a valid stock location for the initial stock")
@@ -175,3 +179,39 @@ def update_product(pid: int, body: ProductIn, db: Session = Depends(get_db), _: 
     p.tax_id = _resolve_tax_id(db, body)
     db.commit()
     return product_out(db, p)
+
+
+def _get_product(db: Session, pid: int) -> Product:
+    p = db.get(Product, pid)
+    if not p:
+        raise HTTPException(404, "Product not found")
+    return p
+
+
+@router.post("/products/{pid}/archive")
+def archive_product(pid: int, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    p = _get_product(db, pid)
+    if reason := lifecycle.archive_blocker(lifecycle.product_usage(db, pid), "This product"):
+        raise HTTPException(409, reason)
+    p.active = False
+    db.commit()
+    return product_out(db, p)
+
+
+@router.post("/products/{pid}/restore")
+def restore_product(pid: int, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    p = _get_product(db, pid)
+    p.active = True
+    db.commit()
+    return product_out(db, p)
+
+
+@router.delete("/products/{pid}")
+def delete_product(pid: int, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    p = _get_product(db, pid)
+    if reason := lifecycle.delete_blocker(lifecycle.product_usage(db, pid), "This product"):
+        raise HTTPException(409, reason)
+    db.query(StockQuant).filter(StockQuant.product_id == pid).delete()
+    db.delete(p)
+    db.commit()
+    return {"ok": True}

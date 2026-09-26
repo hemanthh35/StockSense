@@ -57,6 +57,24 @@ docker compose up --build
 Open the web app and click **Create an account**. The first start seeds a demo warehouse,
 locations, GST slabs and two products so there is something to click on straight away.
 
+### Demo data for presentations
+
+```bash
+docker compose exec backend python -m app.demo --reset
+```
+
+Loads two warehouses, 18 products and about 40 documents in every status (late receipts, waiting deliveries,
+a half-picked delivery, cross-warehouse transfers, low-stock items) plus a `demo_admin` account. Re-run it any
+time to reset. A click-by-click script is in **[DEMO.md](DEMO.md)**.
+
+### Running the tests
+
+```bash
+docker compose exec backend python -m pytest tests -q
+```
+
+68 tests run against a separate throw-away database (`stocksense_test`), so your data is never touched.
+
 Handy commands:
 
 ```bash
@@ -86,7 +104,7 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 **Authentication**
 - Sign up with login ID (6–12 chars, unique), unique email, and a strong password
   (more than 8 chars with lower-case, upper-case and a special character); live rule checklist in the UI.
-- Login, logout, profile menu.
+- Login, logout, and a **My profile** page to change your email and password.
 - OTP password reset: 6-digit code emailed through Brevo, valid 10 minutes, max 5 attempts, stored hashed,
   and the response never reveals whether an email is registered.
 
@@ -100,12 +118,16 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 **Products**
 - Name, SKU, category, unit of measure, unit price, HSN code, tax, reorder level and quantity, optional initial stock.
 - Category management (add, rename, delete when unused).
+- **Archive, restore or delete** products, warehouses and locations. Archiving keeps history and is refused while stock
+  remains or documents are open; only never-used items can be deleted.
+- **CSV import** of products (matched by SKU) with a row-by-row preview before anything is written.
 - Stock availability per location.
 
 **Operations** (list and kanban views, search, status and warehouse filters, pagination)
 - **Receipts** (incoming): `Draft → Ready → Done`. Validating adds stock.
 - **Deliveries** (outgoing): `Draft → Waiting → Ready → Done`. Validating removes stock.
   If stock is short the line turns red, a notification shows, and the order waits until stock arrives.
+  Once Ready, a delivery is **picked, then packed, then validated**; validation is refused until both are done.
 - **Internal transfers**: move stock between locations, including across warehouses.
 - **Adjustments**: enter a counted quantity from the Stock page; the difference is logged.
 - Every state can also be **Cancelled**. Completed documents can be printed.
@@ -122,6 +144,10 @@ docker compose down -v            # stop and DELETE the database volume (fresh s
 **Multi-warehouse**
 - Warehouses and locations (Settings). Receipts and deliveries are created inside a chosen warehouse,
   and references follow it (`WH/IN/0001`, `ND/OUT/0003`).
+
+**CSV export**
+- Products, stock, move history and every operation list export to CSV, honouring the current filters.
+  Cells are sanitised against spreadsheet formula injection and include a BOM so Excel opens them correctly.
 
 **Move history**
 - One ledger row per product line: reference, contact, product, from → to, quantity, date, status.
@@ -167,8 +193,12 @@ StockSense/
 │       ├── stock.py          # stock engine + workflow (todo/validate/cancel/adjust)
 │       ├── pricing.py        # tax resolution + document totals
 │       ├── filters.py        # filters shared by dashboard, lists, moves
-│       ├── seed.py           # demo data + GST slabs + backfill
-│       └── routers/          # auth, settings, products, operations, inventory
+│       ├── lifecycle.py      # can this be archived / deleted? (stock, open documents, history)
+│       ├── seed.py           # first-run data + GST slabs + backfill
+│       ├── demo.py           # `python -m app.demo`: presentation dataset
+│       └── routers/          # auth, settings, products, operations, inventory, exports
+│   └── tests/                # pytest suite (68 tests, own database)
+├── DEMO.md                   # 6-minute demo script
 └── frontend/                 # React + Vite app
     ├── vite.config.js        # dev server + /api proxy
     └── src/
@@ -177,8 +207,8 @@ StockSense/
         ├── hooks.js          # useApi, useDebounced
         ├── styles.css        # design tokens + components
         ├── components/       # Layout, ui (pager, modal, stepper…), icons, CategoryManager
-        └── pages/            # Auth, Dashboard, Operations, OperationDetail,
-                              # Catalog (products + stock), MoveHistory, Settings, Taxes
+        └── pages/            # Auth, Dashboard, Operations, OperationDetail, Catalog (products + stock),
+                              # MoveHistory, Settings (warehouses, locations), Taxes, Profile
 ```
 
 The frontend talks to the API only through `/api/...`; Vite proxies that to the backend
@@ -196,8 +226,11 @@ Interactive docs: **http://localhost:8000/docs**. Everything except `/auth/*` an
 | Auth | `POST /auth/signup`, `/auth/login`, `/auth/forgot-password`, `/auth/reset-password`, `GET /auth/me` |
 | Catalogue | `/products`, `/categories`, `/taxes`, `/category-taxes` |
 | Structure | `/warehouses`, `/locations` |
-| Operations | `/operations`, `/operations/{id}/{todo,check,validate,cancel,duplicate}`, `/contacts`, `/moves` |
+| Operations | `/operations`, `/operations/{id}/{todo,check,pick,pack,validate,cancel,duplicate}`, `/contacts`, `/moves` |
 | Inventory | `/stock`, `/stock/adjust`, `/dashboard`, `/reorder/suggestions`, `/reorder/receipt` |
+| Lifecycle | `POST /{products,locations,warehouses}/{id}/{archive,restore}`, `DELETE` on the same |
+| CSV | `GET /export/{products,stock,moves,operations}.csv`, `POST /products/import` |
+| Account | `PUT /auth/me`, `POST /auth/change-password` |
 
 ---
 
@@ -210,8 +243,10 @@ Interactive docs: **http://localhost:8000/docs**. Everything except `/auth/*` an
   (`npm run build`) and serve the static files behind a reverse proxy.
 - **Tax model:** intra-state GST (CGST + SGST) is displayed. Inter-state IGST, e-invoicing and GST returns are not implemented.
 - **Roles:** all users have the same permissions. Inventory-manager vs warehouse-staff roles are not modelled.
+- **Pick and pack** is a two-step confirmation on Ready deliveries. There are no pick lists, wave picking or packages.
 - **Pagination** is done in the browser, which is fine for thousands of rows but not millions.
-- **No automated test suite yet.** Behaviour was verified through the API and in the browser.
+- **Tests:** the backend has an API-level pytest suite (workflow, taxes, warehouses, reorder, archive/delete, CSV, auth).
+  The React UI has no automated tests; it was checked by hand in the browser, including phone width and print view.
 - **Security notes:** JWTs live in `localStorage`; there is no rate limiting on login or OTP endpoints beyond the
   5-attempt OTP cap. Add both before going to production.
 

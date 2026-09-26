@@ -24,3 +24,21 @@ export async function api(path, { method = 'GET', body, params } = {}) {
   }
   return data
 }
+
+/** Download a CSV endpoint (needs the auth header, so a plain link won't work). */
+export async function downloadCsv(path, params = {}, filename = 'export.csv') {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))
+  const res = await fetch(`/api${path}${[...qs].length ? '?' + qs : ''}`, { headers: { Authorization: `Bearer ${getToken()}` } })
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}))
+    throw new Error(d.detail || 'Export failed')
+  }
+  const url = URL.createObjectURL(await res.blob())
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}

@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useApi, useDebounced } from '../hooks'
 import { Icon } from '../components/icons.jsx'
 import {
-  Empty, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, money, usePager,
+  Empty, ExportButton, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, money, usePager,
 } from '../components/ui.jsx'
 
 export const KINDS = {
@@ -65,9 +65,12 @@ export function OperationList() {
       <PageHeader
         title={cfg.title}
         subtitle={cfg.sub}
-        actions={kind === 'adjustments'
-          ? <Link className="btn primary" to="/stock"><Icon name="sliders" size={16} />Update stock</Link>
-          : <Link className="btn primary" to={`/operations/${kind}/new`}><Icon name="plus" size={16} />New {cfg.single.toLowerCase()}</Link>}
+        actions={<>
+          <ExportButton path="/export/operations.csv" params={{ type: cfg.type, q: dq, status, warehouse_id: wh }} filename={`${kind}.csv`} />
+          {kind === 'adjustments'
+            ? <Link className="btn primary" to="/stock"><Icon name="sliders" size={16} />Update stock</Link>
+            : <Link className="btn primary" to={`/operations/${kind}/new`}><Icon name="plus" size={16} />New {cfg.single.toLowerCase()}</Link>}
+        </>}
       />
       <div className="card">
         <div className="toolbar">

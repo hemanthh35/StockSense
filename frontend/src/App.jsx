@@ -8,7 +8,8 @@ import { OperationList } from './pages/Operations.jsx'
 import OperationDetail from './pages/OperationDetail.jsx'
 import { Products, Stock } from './pages/Catalog.jsx'
 import MoveHistory from './pages/MoveHistory.jsx'
-import { Locations, Profile, Warehouses } from './pages/Settings.jsx'
+import { Locations, Warehouses } from './pages/Settings.jsx'
+import Profile from './pages/Profile.jsx'
 import Taxes from './pages/Taxes.jsx'
 
 export default function App() {
@@ -47,7 +48,7 @@ export default function App() {
         <Route path="/settings/warehouses" element={<Warehouses />} />
         <Route path="/settings/locations" element={<Locations />} />
         <Route path="/settings/taxes" element={<Taxes />} />
-        <Route path="/profile" element={<Profile user={user} />} />
+        <Route path="/profile" element={<Profile user={user} onUserChange={setUser} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

@@ -64,6 +64,8 @@ def op_out(db: Session, op: Operation, with_lines: bool = True) -> dict:
         "source_location": loc_brief(op.source_location),
         "dest_location": loc_brief(op.dest_location),
         "direction": direction_of(op),
+        "picked": op.picked_at is not None,
+        "packed": op.packed_at is not None,
     }
     data.update(pricing.op_totals(op))
     if with_lines:
@@ -119,22 +121,28 @@ def _resolve_locations(db: Session, op_type: str, warehouse_id: int | None, src_
             raise HTTPException(422, "Internal transfers need a From and To location")
         if src.type != "internal" or dst.type != "internal":
             raise HTTPException(422, "Transfers can only move stock between stock locations")
+        if not src.active or not dst.active:
+            raise HTTPException(422, "That location is archived")
         if src.id == dst.id:
             raise HTTPException(422, "From and To must be different locations")
         return src.warehouse, src, dst
 
     tracked = dst if op_type == "IN" else src
     if tracked is None:
-        wh = wh or db.scalar(select(Warehouse).order_by(Warehouse.id))
+        wh = wh or db.scalar(select(Warehouse).where(Warehouse.active.is_(True)).order_by(Warehouse.id))
         if not wh:
             raise HTTPException(422, "Create a warehouse first")
         tracked = db.scalar(
-            select(Location).where(Location.warehouse_id == wh.id, Location.type == "internal").order_by(Location.id)
+            select(Location)
+            .where(Location.warehouse_id == wh.id, Location.type == "internal", Location.active.is_(True))
+            .order_by(Location.id)
         )
         if not tracked:
             raise HTTPException(422, "This warehouse has no stock location yet")
     if tracked.type != "internal":
         raise HTTPException(422, "Choose a stock location")
+    if not tracked.active:
+        raise HTTPException(422, "That location is archived")
     if wh and tracked.warehouse_id != wh.id:
         raise HTTPException(422, "That location belongs to a different warehouse")
     wh = wh or tracked.warehouse
@@ -147,8 +155,11 @@ def _validate_lines(db: Session, lines: list[LineIn]) -> None:
     for ln in lines:
         if ln.quantity <= 0:
             raise HTTPException(422, "Quantity must be greater than zero")
-        if not db.get(Product, ln.product_id):
+        product = db.get(Product, ln.product_id)
+        if not product:
             raise HTTPException(422, "Unknown product")
+        if not product.active:
+            raise HTTPException(422, f"{product.sku} is archived and can't be used on new documents")
 
 
 def _make_lines(db: Session, lines: list[LineIn]) -> list[OperationLine]:
@@ -233,6 +244,7 @@ def update_operation(op_id: int, body: OperationIn, db: Session = Depends(get_db
     op.lines = _make_lines(db, body.lines)
     if op.status != "draft":  # edits invalidate the earlier availability check
         op.status = "draft"
+    op.picked_at = op.packed_at = None
     db.commit()
     return op_out(db, _load(db, op_id))
 
@@ -258,6 +270,10 @@ def operation_action(op_id: int, action: str, db: Session = Depends(get_db), use
             message = stock.action_todo(db, op)
         elif action == "check":
             message = stock.action_check(db, op)
+        elif action == "pick":
+            stock.action_pick(db, op)
+        elif action == "pack":
+            stock.action_pack(db, op)
         elif action == "validate":
             message = stock.action_validate(db, op)
         elif action == "cancel":

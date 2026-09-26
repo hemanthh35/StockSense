@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useApi, useDebounced } from '../hooks'
 import { Icon } from '../components/icons.jsx'
-import { Empty, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, num, usePager } from '../components/ui.jsx'
+import { Empty, ExportButton, PageHeader, Pager, SearchInput, Segmented, Status, STATUS_LABEL, TableSkeleton, fmtDate, num, usePager } from '../components/ui.jsx'
 
 const KIND_PATH = { IN: 'receipts', OUT: 'deliveries', INT: 'transfers', ADJ: 'adjustments' }
 const VIEW_OPTS = [{ value: 'list', label: 'List', icon: 'list' }, { value: 'kanban', label: 'Kanban', icon: 'kanban' }]
@@ -24,7 +24,11 @@ export default function MoveHistory() {
 
   return (
     <>
-      <PageHeader title="Move history" subtitle="Every stock movement between locations. Incoming moves are green, outgoing are red." />
+      <PageHeader
+        title="Move history"
+        subtitle="Every stock movement between locations. Incoming moves are green, outgoing are red."
+        actions={<ExportButton path="/export/moves.csv" params={{ q: dq, status, direction, warehouse_id: wh }} filename="move-history.csv" />}
+      />
       <div className="card">
         <div className="toolbar">
           <SearchInput value={q} onChange={setQ} />

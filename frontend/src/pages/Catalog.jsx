@@ -4,7 +4,9 @@ import { api } from '../api'
 import { useApi, useDebounced } from '../hooks'
 import { Icon } from '../components/icons.jsx'
 import CategoryManager from '../components/CategoryManager.jsx'
-import { Empty, Field, Modal, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
+import ProductImport from '../components/ProductImport.jsx'
+import { ArchivedTag, LifecycleActions } from '../components/Lifecycle.jsx'
+import { Empty, ExportButton, Field, Modal, PageHeader, Pager, SearchInput, TableSkeleton, Toast, money, num, usePager, useToast } from '../components/ui.jsx'
 
 const emptyP = { name: '', sku: '', category_id: '', uom: 'Unit', unit_cost: 0, hsn_code: '', tax_id: '', reorder_min: 0, reorder_qty: 0, initial_stock: 0, initial_location_id: '' }
 
@@ -13,7 +15,9 @@ export function Products() {
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('')
   const dq = useDebounced(q)
-  const { data, reload } = useApi('/products', { q: dq, category_id: cat })
+  const [showArchived, setShowArchived] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const { data, reload } = useApi('/products', { q: dq, category_id: cat, include_archived: showArchived ? 'true' : '' })
   const cats = useApi('/categories')
   const locs = useApi('/locations', { internal_only: true }).data || []
   const taxes = useApi('/taxes').data || []
@@ -57,6 +61,8 @@ export function Products() {
         title="Products"
         subtitle="Your catalogue — SKUs, categories, costs and reorder rules."
         actions={<>
+          <ExportButton path="/export/products.csv" params={{ include_archived: showArchived ? 'true' : '' }} filename="products.csv" onError={(m) => notify(m, 'error')} />
+          <button className="btn" onClick={() => setImporting(true)}><Icon name="upload" size={16} />Import</button>
           <button className="btn" onClick={() => setManageCats(true)}><Icon name="tag" size={16} />Categories</button>
           <button className="btn primary" onClick={() => setForm({ ...emptyP })}><Icon name="plus" size={16} />New product</button>
         </>}
@@ -68,6 +74,8 @@ export function Products() {
             <option value="">All categories</option>
             {(cats.data || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
+          <span className="grow" />
+          <label className="check"><span className="switch"><input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} /><i /></span>Show archived</label>
         </div>
         <div className="table-wrap">
           <table className="rows">
@@ -75,8 +83,8 @@ export function Products() {
             <tbody>
               {!data && <TableSkeleton cols={7} />}
               {pager.slice.map((p) => (
-                <tr key={p.id} onClick={() => setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
-                  <td className="strong">{p.name}<span className="sub mono">{p.sku}</span></td>
+                <tr key={p.id} style={p.active ? undefined : { opacity: 0.6 }} onClick={() => setForm({ ...p, category_id: p.category_id || '', tax_id: p.tax_id || 0, hsn_code: p.hsn_code || '' })}>
+                  <td className="strong">{p.name} {!p.active && <ArchivedTag />}<span className="sub mono">{p.sku}</span></td>
                   <td>{p.category ? <span className="tag">{p.category}</span> : <span className="dim">—</span>}</td>
                   <td className="muted">{p.uom}</td>
                   <td>{p.tax ? <span className="tax-tag">{p.tax.name}</span> : <span className="tax-tag none">No tax</span>}</td>
@@ -92,6 +100,8 @@ export function Products() {
         <Pager p={pager} />
       </div>
 
+      {importing && <ProductImport onClose={() => setImporting(false)} onDone={() => { setImporting(false); reload(); cats.reload() }} notify={notify} />}
+
       {manageCats && (
         <CategoryManager
           categories={cats.data || []}
@@ -106,7 +116,11 @@ export function Products() {
           title={form.id ? 'Edit product' : 'New product'}
           subtitle={form.id ? form.sku : 'Add an item to the catalogue.'}
           onClose={closeForm}
-          footer={<><button className="btn" onClick={closeForm}>Discard</button><button className="btn primary" form="product-form">Save product</button></>}
+          footer={<>
+            <LifecycleActions item={form} base="/products" name="Product" notify={notify} onDone={() => { closeForm(); reload() }} />
+            <button className="btn" onClick={closeForm}>Discard</button>
+            <button className="btn primary" form="product-form">Save product</button>
+          </>}
         >
           <form id="product-form" className="form-grid" onSubmit={save}>
             <Field label="Name"><input value={form.name} onChange={set('name')} required autoFocus /></Field>
@@ -174,7 +188,11 @@ export function Stock() {
 
   return (
     <>
-      <PageHeader title="Stock" subtitle="Available inventory by product and location. Enter a physical count to correct a quantity — the difference is logged in Move History." />
+      <PageHeader
+        title="Stock"
+        subtitle="Available inventory by product and location. Enter a physical count to correct a quantity — the difference is logged in Move History."
+        actions={<ExportButton path="/export/stock.csv" params={{ q: dq, warehouse_id: wh }} filename="stock.csv" onError={(m) => notify(m, 'error')} />}
+      />
       <div className="card">
         <div className="toolbar">
           <SearchInput value={q} onChange={setQ} placeholder="Search product or SKU" />

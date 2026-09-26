@@ -28,8 +28,8 @@ def seed_taxes(db: Session) -> None:
     db.commit()
 
 
-def seed(db: Session) -> None:
-    """Idempotent: virtual locations always, demo warehouse/products only on a fresh DB."""
+def seed_virtual_locations(db: Session) -> None:
+    """The vendor / customer / adjustment endpoints every document needs. Idempotent."""
     if not db.scalar(select(Location).where(Location.type == "vendor")):
         db.add_all(
             [
@@ -40,6 +40,10 @@ def seed(db: Session) -> None:
         )
         db.commit()
 
+
+def seed(db: Session) -> None:
+    """Idempotent: virtual locations always, demo warehouse/products only on a fresh DB."""
+    seed_virtual_locations(db)
     seed_taxes(db)
 
     if db.scalar(select(Warehouse)):

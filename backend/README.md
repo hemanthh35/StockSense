@@ -61,15 +61,18 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 | `security.py` | Password hashing, password-strength rules, JWT create/decode. |
 | `deps.py` | `current_user` dependency; returns 401 for missing/invalid tokens. |
 | `mail.py` | `send_otp()` via Brevo. On failure or missing config it logs the OTP so development never blocks. |
-| `stock.py` | **The stock engine**: references, on-hand, reservations, availability, workflow actions, adjustments. |
+| `stock.py` | **The stock engine**: references, on-hand, reservations, availability, workflow actions (todo/check/pick/pack/validate/cancel), adjustments. |
 | `pricing.py` | Tax resolution for products/lines and document totals with per-tax breakdown. |
 | `filters.py` | `op_filters()`: one place that applies type/status/warehouse/location/category/search to operation queries. |
-| `seed.py` | Virtual locations, GST slabs, demo warehouse and products; back-fills older rows. Idempotent. |
+| `lifecycle.py` | Usage checks (stock on hand, open documents, history) that decide whether a product, location or warehouse can be archived or deleted. |
+| `seed.py` | Virtual locations, GST slabs, first-run demo warehouse and products; back-fills older rows. Idempotent. |
+| `demo.py` | `python -m app.demo [--reset]`: builds the presentation dataset (see [DEMO.md](../DEMO.md)). |
 | `routers/auth.py` | Sign-up, login, profile, OTP reset. |
 | `routers/settings.py` | Warehouses, locations, taxes, per-category default tax. |
 | `routers/products.py` | Categories and products. |
 | `routers/operations.py` | Receipts, deliveries, transfers, workflow actions, contacts, move history. |
 | `routers/inventory.py` | Stock view, adjustments, dashboard, reorder suggestions. |
+| `routers/exports.py` | CSV exports and the product CSV import. |
 
 ---
 
@@ -79,14 +82,14 @@ You still need a Postgres 16 instance reachable at `DATABASE_URL`
 |---|---|---|
 | `users` | `login_id` (unique, 6–12), `email` (unique), `password_hash` | |
 | `otp_codes` | `email`, `code_hash`, `expires_at`, `attempts`, `used` | 10-minute expiry, 5 attempts |
-| `warehouses` | `name`, `short_code` (unique), `address` | Short code prefixes references |
-| `locations` | `name`, `short_code`, `type`, `warehouse_id` | `type`: `internal` (holds stock) · `vendor` · `customer` · `adjustment` (virtual) |
+| `warehouses` | `name`, `short_code` (unique), `address`, `active` | Short code prefixes references |
+| `locations` | `name`, `short_code`, `type`, `warehouse_id`, `active` | `type`: `internal` (holds stock) · `vendor` · `customer` · `adjustment` (virtual) |
 | `taxes` | `name` (unique), `rate`, `kind` (`GST`/`OTHER`), `active`, `is_default` | Only one default |
 | `categories` | `name` (unique), `default_tax_id` | |
-| `products` | `name`, `sku` (unique), `category_id`, `uom`, `unit_cost`, `hsn_code`, `tax_id`, `reorder_min`, `reorder_qty` | |
+| `products` | `name`, `sku` (unique), `category_id`, `uom`, `unit_cost`, `hsn_code`, `tax_id`, `reorder_min`, `reorder_qty`, `active` | `active = false` means archived |
 | `stock_quants` | `product_id`, `location_id`, `quantity` | Unique per product+location; only `internal` locations |
 | `sequences` | `key` (`<warehouse id>/<type>`), `value` | Locked with `SELECT … FOR UPDATE` when numbering |
-| `operations` | `reference` (unique), `type`, `status`, `contact`, `schedule_date`, `responsible_id`, `warehouse_id`, `source_location_id`, `dest_location_id`, `done_at` | `type`: `IN` `OUT` `INT` `ADJ` |
+| `operations` | `reference` (unique), `type`, `status`, `contact`, `schedule_date`, `responsible_id`, `warehouse_id`, `source_location_id`, `dest_location_id`, `done_at`, `picked_at`, `packed_at` | `type`: `IN` `OUT` `INT` `ADJ` |
 | `operation_lines` | `operation_id`, `product_id`, `quantity`, `unit_price`, `tax_rate`, `tax_name` | Price and tax are **snapshots** |
 
 There is no separate ledger table: **operations + lines are the ledger**. Move history is derived
@@ -100,7 +103,7 @@ from them (direction comes from the source/destination location types).
 
 ```
 Receipt   : draft ──todo──▶ ready ──validate──▶ done
-Delivery  : draft ──todo──▶ ready ──validate──▶ done
+Delivery  : draft ──todo──▶ ready ──pick──▶ ──pack──▶ ──validate──▶ done
                      └─short on stock─▶ waiting ──(stock arrives / check)──▶ ready
 Any open state ──cancel──▶ cancelled
 ```
@@ -108,6 +111,8 @@ Any open state ──cancel──▶ cancelled
 - `todo` (draft → ready). For outgoing moves, if any line is short the document goes to `waiting` instead
   and the response carries a notification message.
 - `check` (waiting → ready) re-tests availability.
+- `pick` then `pack` (deliveries only, while Ready): `validate` on a delivery is refused with 409 until it has been packed.
+  Anything that leaves Ready (edit, shortage, back to Waiting) clears the pick and pack marks.
 - `validate` (ready → done) re-tests availability, then moves stock: subtract from the source location,
   add to the destination (virtual locations are ignored). Afterwards every `waiting` document is re-checked and
   promoted to `ready` if it can now be served.
@@ -117,6 +122,13 @@ Any open state ──cancel──▶ cancelled
 `free = on hand at the source location − quantity on OTHER ready OUT/INT documents from that location`.
 A line is *short* when the document's total need for that product exceeds `free`.
 Only outgoing moves from `internal` locations are checked.
+
+### Archive and delete (`lifecycle.py`)
+- **Archive** (`POST …/archive`) is refused with 409 while the item still holds stock or is used by an open
+  (draft / waiting / ready) document. Archived products, locations and warehouses disappear from pickers and
+  reports but stay in history; `…/restore` brings them back.
+- **Delete** (`DELETE …`) only succeeds for things that were never used (no stock, no document lines); otherwise
+  409 "archive it instead". Deleting a warehouse also removes its unused locations.
 
 ### Adjustments
 `POST /stock/adjust` sets the on-hand quantity to a counted value and records a **done** `ADJ` operation for the
@@ -158,13 +170,17 @@ All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 
 | GET | `/auth/me` | Current user |
 | POST | `/auth/forgot-password` | `email`. Always answers the same message. Sends the OTP if the account exists |
 | POST | `/auth/reset-password` | `email`, `otp`, `new_password`, `confirm_password` |
+| PUT | `/auth/me` | `email`. 409 if already used |
+| POST | `/auth/change-password` | `current_password`, `new_password`, `confirm_password` |
 
 ### Settings
 | Method | Path | Notes |
 |---|---|---|
-| GET/POST | `/warehouses` | `name`, `short_code`, `address` |
+| GET/POST | `/warehouses` | `name`, `short_code`, `address`. GET takes `?include_archived=true` |
 | PUT | `/warehouses/{id}` | |
-| GET | `/locations` | `?warehouse_id=` `?internal_only=true` |
+| POST | `/warehouses/{id}/archive`, `/restore` · DELETE `/warehouses/{id}` | See *Archive and delete* |
+| GET | `/locations` | `?warehouse_id=` `?internal_only=true` `?include_archived=true` |
+| POST | `/locations/{id}/archive`, `/restore` · DELETE `/locations/{id}` | Stock locations only |
 | POST/PUT | `/locations`, `/locations/{id}` | `name`, `short_code`, `warehouse_id` |
 | GET | `/taxes` | `?include_inactive=true` |
 | POST/PUT | `/taxes`, `/taxes/{id}` | `name`, `rate` (0–100), `kind`, `active`, `is_default` |
@@ -178,7 +194,9 @@ All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 
 | POST | `/categories` | `name` (returns the existing one if the name already exists) |
 | PUT | `/categories/{id}` | Rename; 409 on duplicate name |
 | DELETE | `/categories/{id}` | 409 while products still use it |
-| GET | `/products` | `?q=` (name/SKU) `?category_id=` |
+| GET | `/products` | `?q=` (name/SKU) `?category_id=` `?include_archived=true` |
+| POST | `/products/{id}/archive`, `/restore` · DELETE `/products/{id}` | See *Archive and delete* |
+| POST | `/products/import` | `{csv, dry_run}`. Matches by SKU. `dry_run: true` returns a per-row preview and writes nothing |
 | POST/PUT | `/products`, `/products/{id}` | `name`, `sku`, `category_id`, `uom`, `unit_cost`, `hsn_code`, `tax_id`, `reorder_min`, `reorder_qty`; on create also `initial_stock`, `initial_location_id` |
 
 ### Operations
@@ -190,11 +208,17 @@ All paths are under `/api`. Errors use `{"detail": "message"}` with 401 (auth), 
 | PUT | `/operations/{id}` | Same body as create; only while not done/cancelled |
 | POST | `/operations/{id}/todo` | draft → ready (or waiting) |
 | POST | `/operations/{id}/check` | waiting → ready if stock allows |
-| POST | `/operations/{id}/validate` | ready → done, moves stock |
+| POST | `/operations/{id}/pick`, `/pack` | Deliveries in Ready. Must pick before packing |
+| POST | `/operations/{id}/validate` | ready → done, moves stock (deliveries must be packed) |
 | POST | `/operations/{id}/cancel` | |
 | POST | `/operations/{id}/duplicate` | New draft copy at current prices |
 | GET | `/contacts` | `?type=` previously used contacts |
 | GET | `/moves` | Ledger rows. `?q=` `?status=` `?direction=in\|out\|transfer` `?type=` `?warehouse_id=` `?location_id=` `?category_id=` |
+
+### CSV export
+`GET /export/products.csv` · `/export/stock.csv` · `/export/moves.csv` · `/export/operations.csv`. The list endpoints'
+filters apply (`q`, `status`, `type`, `warehouse_id`, `location_id`, `category_id`, …). Files start with a UTF-8 BOM and
+text cells beginning with `=`, `+`, `-` or `@` are prefixed with `'` to defuse spreadsheet formulas.
 
 ### Inventory
 | Method | Path | Notes |
@@ -254,4 +278,23 @@ If you outgrow this, adopt Alembic.
 - Raise `HTTPException` with a clear human message: the UI shows `detail` verbatim.
 - Money and quantities are floats rounded to 2 decimals for amounts. Fine for a hackathon; use `Numeric`/`Decimal` in production.
 
-**Not yet covered:** automated tests, rate limiting, roles/permissions, audit of who edited what, Alembic migrations.
+## Tests
+
+```bash
+docker compose exec backend python -m pytest tests -q
+```
+
+The suite (`backend/tests/`, 68 tests) drives the real API through FastAPI's `TestClient` against a separate Postgres
+database, `stocksense_test`, which is created on first run and rebuilt every run. OTP emails are captured instead of sent.
+
+| File | Covers |
+|---|---|
+| `test_auth.py` | sign-up rules, login, OTP reset (including lock-out), change password, profile |
+| `test_workflow.py` | receipts, shortages and auto-promotion, reservations, pick and pack, transfers, adjustments, duplicate |
+| `test_taxes.py` | default / category / explicit tax, totals, rate snapshots on validated documents |
+| `test_inventory_rules.py` | multi-warehouse rules, reorder suggestions, categories, search, dashboard filters |
+| `test_lifecycle_and_csv.py` | archive and delete rules, CSV exports, formula sanitising, import preview and apply |
+
+`tests/helpers.py` has small builders (`product`, `make_op`, `receive`, `ship`, `warehouse`) to keep new tests short.
+
+**Not yet covered:** rate limiting, roles/permissions, audit of who edited what, Alembic migrations, UI tests.

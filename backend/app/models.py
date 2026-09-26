@@ -33,6 +33,7 @@ class Warehouse(Base):
     name: Mapped[str] = mapped_column(String(100))
     short_code: Mapped[str] = mapped_column(String(10), unique=True)
     address: Mapped[str | None] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(default=True)
     locations: Mapped[list["Location"]] = relationship(back_populates="warehouse")
 
 
@@ -45,6 +46,7 @@ class Location(Base):
     short_code: Mapped[str] = mapped_column(String(20))
     type: Mapped[str] = mapped_column(String(15), default="internal")
     warehouse_id: Mapped[int | None] = mapped_column(ForeignKey("warehouses.id"))
+    active: Mapped[bool] = mapped_column(default=True)
     warehouse: Mapped[Warehouse | None] = relationship(back_populates="locations")
 
     @property
@@ -86,6 +88,7 @@ class Product(Base):
     reorder_min: Mapped[float] = mapped_column(Float, default=0)
     reorder_qty: Mapped[float] = mapped_column(Float, default=0)
     hsn_code: Mapped[str | None] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(default=True)
     tax_id: Mapped[int | None] = mapped_column(ForeignKey("taxes.id"))
     tax: Mapped[Tax | None] = relationship()
 
@@ -122,6 +125,8 @@ class Operation(Base):
     dest_location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     done_at: Mapped[datetime | None] = mapped_column(DateTime)
+    picked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    packed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     responsible: Mapped[User | None] = relationship()
     warehouse: Mapped[Warehouse] = relationship()
